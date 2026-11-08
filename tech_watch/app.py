@@ -372,7 +372,7 @@ class ScreenerDialog(QDialog):
         self.limit.setValue(221)
         self.limit.setToolTip("0 = no limit (TSX directory can be very large/slow)")
         controls.addWidget(self.limit)
-        self.run_btn = QPushButton("Scan for screaming buys")
+        self.run_btn = QPushButton("Scan")
         controls.addWidget(self.run_btn)
         controls.addStretch(1)
         layout.addLayout(controls)
@@ -603,7 +603,7 @@ class TrayApp(QObject):
         ai_act.triggered.connect(self.set_ai_command)
         self.menu.addAction(ai_act)
 
-        scan_act = QAction("Scan TSX for screaming buys...", self.menu)
+        scan_act = QAction("TSX Screener...", self.menu)
         scan_act.triggered.connect(self.show_screener)
         self.menu.addAction(scan_act)
 
