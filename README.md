@@ -1,4 +1,4 @@
-# Tech Watch (KDE/Plasma tray)
+# Tech Watch Tray (KDE/Plasma)
 
 A small Linux tray application for KDE/Plasma that monitors stock/security technicals by asking an **AI CLI/command** once per day (or on demand) and notifying you when a configured security looks positive for adding capital.
 
@@ -81,8 +81,8 @@ Create `~/.config/autostart/tech-watch.desktop`:
 ```ini
 [Desktop Entry]
 Type=Application
-Name=Tech Watch
-Comment=Daily Gemini technicals monitor
+Name=Tech Watch Tray
+Comment=Daily AI technicals monitor for securities
 Exec=/usr/bin/python3 /opt/src/tech-watch/tech-watch.py
 X-KDE-autostart-after=panel
 Terminal=false
@@ -93,7 +93,7 @@ Adjust `Exec` if you move the project.
 
 ## Notes / limitations
 
-- This app does **not** fetch market data directly; it relies on Gemini's ability to analyze/report technicals for the symbol you provide. Results depend on Gemini's available data/tools and may be incomplete or stale.
+- This app does **not** fetch market data directly; it relies on the configured AI command/provider to analyze/report technicals for the symbol you provide. Results depend on the provider's available data/tools and may be incomplete or stale.
 - Treat output as informational, not financial advice.
-- Gemini CLI prompts can take time and require network/auth; failures are shown in notifications and stored per symbol.
-- For unattended daily checks, make sure Gemini CLI works non-interactively in your environment (`gemini -p "hello"`).
+- AI prompts can take time and require network/auth; failures are shown in notifications and stored per symbol.
+- For unattended daily checks, make sure your configured `ai.command` works non-interactively in a terminal.

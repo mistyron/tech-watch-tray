@@ -73,7 +73,7 @@ class AnalysisWorker(threading.Thread):
 class ManageSymbolsDialog(QDialog):
     def __init__(self, cfg: dict[str, Any], parent: QWidget | None = None):
         super().__init__(parent)
-        self.setWindowTitle("Tech Watch - Securities")
+        self.setWindowTitle("Tech Watch Tray - Securities")
         self.cfg = cfg
         self.resize(420, 360)
 
@@ -142,7 +142,7 @@ class DetailsDialog(QDialog):
         super().__init__(parent)
         self.cfg = cfg
         self.check_status: dict[str, str] = {}
-        self.setWindowTitle("Tech Watch - Details")
+        self.setWindowTitle("Tech Watch Tray - Details")
         self.resize(940, 660)
         layout = QVBoxLayout(self)
 
@@ -316,7 +316,7 @@ class TrayApp(QObject):
         self._busy_base_icon: QIcon | None = None
 
         self.tray = QSystemTrayIcon(self._icon_for_state("idle"))
-        self.tray.setToolTip("Tech Watch: idle")
+        self.tray.setToolTip("Tech Watch Tray: idle")
         self.menu = QMenu()
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(self._on_activated)
@@ -454,7 +454,7 @@ class TrayApp(QObject):
 
     def _update_tray_state(self) -> None:
         if self.check_in_progress:
-            self.tray.setToolTip("Tech Watch: checking AI…")
+            self.tray.setToolTip("Tech Watch Tray: checking AI…")
             return
 
         self._stop_busy_indicator()
@@ -474,7 +474,7 @@ class TrayApp(QObject):
 
         state = "alert" if alert else "error" if error else "idle" if not lines else "ok"
         self.tray.setIcon(self._icon_for_state(state))
-        tip = "Tech Watch\n" + ("\n".join(lines) if lines else "No securities configured")
+        tip = "Tech Watch Tray\n" + ("\n".join(lines) if lines else "No securities configured")
         self.tray.setToolTip(tip[:1024])
 
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
@@ -513,7 +513,7 @@ class TrayApp(QObject):
         symbols = [str(s).strip().upper() for s in self.cfg.get("symbols", []) if str(s).strip()]
         if not symbols:
             self.tray.showMessage(
-                "Tech Watch",
+                "Tech Watch Tray",
                 "No securities configured. Use 'Manage securities...' to add symbols.",
                 QSystemTrayIcon.MessageIcon.Information,
                 8000,
@@ -523,7 +523,7 @@ class TrayApp(QObject):
         self._update_tray_state()
         self._start_busy_indicator()
         self.tray.showMessage(
-            "Tech Watch",
+            "Tech Watch Tray",
             f"Checking technicals for: {', '.join(symbols)}",
             QSystemTrayIcon.MessageIcon.Information,
             5000,
@@ -572,7 +572,7 @@ class TrayApp(QObject):
         if result_obj.ok and changed_to_alert and first_alert:
             self._last_notified[result_obj.symbol] = notify_key
             self.tray.showMessage(
-                f"Tech Watch: {result_obj.symbol}",
+                f"Tech Watch Tray: {result_obj.symbol}",
                 f"Verdict: {verdict}\n{result_obj.summary}",
                 QSystemTrayIcon.MessageIcon.Warning if verdict == "BUY" else QSystemTrayIcon.MessageIcon.Information,
                 15000,
@@ -582,7 +582,7 @@ class TrayApp(QObject):
             if result_obj.error and result_obj.error not in msg and "IneligibleTierError" not in msg:
                 msg = f"{msg}\n{(result_obj.error[:180] + '…') if len(result_obj.error) > 180 else result_obj.error}"
             self.tray.showMessage(
-                f"Tech Watch: {result_obj.symbol}",
+                f"Tech Watch Tray: {result_obj.symbol}",
                 f"Check failed: {msg}",
                 QSystemTrayIcon.MessageIcon.Critical,
                 15000,
@@ -606,7 +606,7 @@ class TrayApp(QObject):
         self._check_status = {}
         self._rebuild_menu()
         self._sync_details_status()
-        self.tray.showMessage("Tech Watch", "Check state was reset after a stalled check.", QSystemTrayIcon.MessageIcon.Warning, 8000)
+        self.tray.showMessage("Tech Watch Tray", "Check state was reset after a stalled check.", QSystemTrayIcon.MessageIcon.Warning, 8000)
 
     def manage_symbols(self) -> None:
         dlg = ManageSymbolsDialog(self.cfg, None)
@@ -628,7 +628,7 @@ class TrayApp(QObject):
             current_s = 'gemini -p "{prompt}"'
         text, ok = QInputDialog.getText(
             None,
-            "Tech Watch - AI command",
+            "Tech Watch Tray - AI command",
             "Command argv (use {prompt} placeholder). Example: gemini -p {prompt}\n",
             text=current_s,
         )
@@ -637,7 +637,7 @@ class TrayApp(QObject):
         try:
             parts = shlex.split(text.strip())
         except Exception as e:
-            QMessageBox.warning(None, "Tech Watch", f"Could not parse command: {e}")
+            QMessageBox.warning(None, "Tech Watch Tray", f"Could not parse command: {e}")
             return
         if not parts:
             return
@@ -647,7 +647,7 @@ class TrayApp(QObject):
         self._save()
         self._rebuild_menu()
         self.tray.showMessage(
-            "Tech Watch",
+            "Tech Watch Tray",
             "AI command saved. Use 'Check all now' to test. If checks fail, the notification/details will show the command error.",
             QSystemTrayIcon.MessageIcon.Information,
             10000,
@@ -676,20 +676,20 @@ class TrayApp(QObject):
 
     def show_config_location(self) -> None:
         path = str(config_path())
-        self.tray.showMessage("Tech Watch config", path, QSystemTrayIcon.MessageIcon.Information, 10000)
+        self.tray.showMessage("Tech Watch Tray config", path, QSystemTrayIcon.MessageIcon.Information, 10000)
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = argv if argv is not None else sys.argv
     app = QApplication(argv)
     app.setQuitOnLastWindowClosed(False)
-    app.setApplicationName("Tech Watch")
-    app.setOrganizationName("Tech Watch")
+    app.setApplicationName("Tech Watch Tray")
+    app.setOrganizationName("Tech Watch Tray")
 
     if not QSystemTrayIcon.isSystemTrayAvailable():
         QMessageBox.critical(
             None,
-            "Tech Watch",
+            "Tech Watch Tray",
             "System tray is not available on this session. Start it in a Plasma/KDE tray-enabled session.",
         )
         return 1
