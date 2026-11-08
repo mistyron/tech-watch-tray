@@ -89,12 +89,20 @@ class ScreenerWorker(threading.Thread):
     def run(self) -> None:
         try:
             universe = get_universe(self.mode, limit=self.limit)
+            min_score = self.min_score
             hits = screen_symbols(
                 universe,
-                min_score=self.min_score,
+                min_score=1,
                 progress_cb=lambda d, t, s: self.signals.progress.emit(d, t, s),
             )
-            self.signals.done.emit({"hits": [h.to_dict() for h in hits], "scanned": len(universe), "mode": self.mode})
+            filtered = [h for h in hits if h.score >= min_score]
+            self.signals.done.emit({
+                "hits": [h.to_dict() for h in filtered],
+                "top": [h.to_dict() for h in hits[:15]],
+                "scanned": len(universe),
+                "mode": self.mode,
+                "min_score": min_score,
+            })
         except Exception as e:
             self.signals.error.emit(str(e))
 
@@ -349,7 +357,7 @@ class ScreenerDialog(QDialog):
         controls.addWidget(QLabel("Min score:"))
         self.min_score = QSpinBox()
         self.min_score.setRange(1, 100)
-        self.min_score.setValue(60)
+        self.min_score.setValue(55)
         controls.addWidget(self.min_score)
         controls.addWidget(QLabel("Max symbols:"))
         self.limit = QSpinBox()
@@ -415,9 +423,15 @@ class ScreenerDialog(QDialog):
             self.status.setText("Scan finished.")
             return
         self._hits = payload.get("hits") or []
+        top = payload.get("top") or []
         scanned = payload.get("scanned") or 0
-        self.status.setText(f"Scanned {scanned} symbols. Found {len(self._hits)} match(es) with score >= {self.min_score.value()}.")
-        for hit in self._hits:
+        min_score = payload.get("min_score") or self.min_score.value()
+        show = self._hits if self._hits else top
+        if self._hits:
+            self.status.setText(f"Scanned {scanned} symbols. Found {len(self._hits)} match(es) with score >= {min_score}.")
+        else:
+            self.status.setText(f"Scanned {scanned} symbols. No symbols met score >= {min_score}; showing top {len(show)} by technical score (market may have few strong setups now).")
+        for hit in show:
             row = self.table.rowCount()
             self.table.insertRow(row)
             reasons = "; ".join(hit.get("reasons") or [])
@@ -433,6 +447,8 @@ class ScreenerDialog(QDialog):
                 item = QTableWidgetItem(val)
                 if col == 2 and val == "SCREAMING BUY":
                     item.setForeground(Qt.GlobalColor.darkGreen)
+                if not self._hits and col in (0, 1, 2):
+                    item.setForeground(Qt.GlobalColor.gray)
                 if col == 5:
                     item.setToolTip(reasons)
                 self.table.setItem(row, col, item)

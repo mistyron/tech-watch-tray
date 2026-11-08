@@ -232,7 +232,7 @@ def analyze_history(symbol: str, name: str, df: pd.DataFrame) -> ScreenHit | Non
         reasons.append("Weak momentum with negative price action")
 
     score = max(0, min(100, score))
-    verdict = "SCREAMING BUY" if score >= 70 else "STRONG" if score >= 55 else "WATCH" if score >= 40 else "NEUTRAL"
+    verdict = "SCREAMING BUY" if score >= 65 else "STRONG" if score >= 55 else "WATCH" if score >= 40 else "NEUTRAL"
     metrics = {
         "close": round(price, 4),
         "rsi14": None if pd.isna(r) else round(float(r), 2),
