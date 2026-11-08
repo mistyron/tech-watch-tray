@@ -385,8 +385,8 @@ class ScreenerDialog(QDialog):
         self.progress.setValue(0)
         layout.addWidget(self.progress)
 
-        self.table = QTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels(["Symbol", "Score", "Verdict", "Price", "Chg %", "Div %", "Reasons"])
+        self.table = QTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels(["Symbol", "Score", "Verdict", "Risk", "Price", "Chg %", "Div %", "Reasons"])
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
@@ -396,7 +396,7 @@ class ScreenerDialog(QDialog):
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         th = self.table.horizontalHeader()
         th.setStretchLastSection(False)
-        for i in range(7):
+        for i in range(8):
             th.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.table)
 
@@ -447,10 +447,14 @@ class ScreenerDialog(QDialog):
             self.table.insertRow(row)
             reasons = "; ".join(hit.get("reasons") or [])
             div = hit.get("dividend_yield_pct")
+            risk = hit.get("risk")
+            risk_label = hit.get("risk_label") or ""
+            risk_text = "" if risk is None else f"{risk_label} ({risk})"
             vals = [
                 str(hit.get("symbol") or ""),
                 str(hit.get("score") or ""),
                 str(hit.get("verdict") or ""),
+                risk_text,
                 "" if hit.get("price") is None else str(hit.get("price")),
                 "" if hit.get("change_pct") is None else f"{hit.get('change_pct')}%",
                 "" if div is None else f"{div}%",
@@ -460,9 +464,16 @@ class ScreenerDialog(QDialog):
                 item = QTableWidgetItem(val)
                 if col == 2 and val == "SCREAMING BUY":
                     item.setForeground(Qt.GlobalColor.darkGreen)
+                if col == 3 and risk is not None:
+                    if risk >= 75:
+                        item.setForeground(Qt.GlobalColor.darkRed)
+                    elif risk >= 55:
+                        item.setForeground(QColor(180, 120, 0))
+                    elif risk < 35:
+                        item.setForeground(Qt.GlobalColor.darkGreen)
                 if not self._hits and col in (0, 1, 2):
                     item.setForeground(Qt.GlobalColor.gray)
-                if col == 6:
+                if col == 7:
                     item.setToolTip(reasons)
                 self.table.setItem(row, col, item)
 

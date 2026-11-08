@@ -25,6 +25,8 @@ class ScreenHit:
     price: float | None
     change_pct: float | None
     dividend_yield_pct: float | None
+    risk: int
+    risk_label: str
     reasons: list[str]
     metrics: dict[str, Any]
     checked_at: str
@@ -38,6 +40,8 @@ class ScreenHit:
             "price": self.price,
             "change_pct": self.change_pct,
             "dividend_yield_pct": self.dividend_yield_pct,
+            "risk": self.risk,
+            "risk_label": self.risk_label,
             "reasons": self.reasons,
             "metrics": self.metrics,
             "checked_at": self.checked_at,
@@ -246,6 +250,56 @@ def analyze_history(symbol: str, name: str, df: pd.DataFrame) -> ScreenHit | Non
     except Exception:
         dividend_yield_pct = None
 
+    # Risk assessment (technical heuristic; higher = riskier, not investment advice)
+    risk = 25
+    risk_reasons: list[str] = []
+    rets = close.pct_change().dropna()
+    ann_vol = float(rets.tail(20).std() * np.sqrt(252) * 100) if len(rets) >= 20 and pd.notna(rets.tail(20).std()) else np.nan
+    if pd.notna(ann_vol):
+        if ann_vol >= 60:
+            risk += 25
+            risk_reasons.append(f"high volatility ({ann_vol:.0f}% ann.)")
+        elif ann_vol >= 40:
+            risk += 15
+            risk_reasons.append(f"elevated volatility ({ann_vol:.0f}% ann.)")
+        elif ann_vol >= 25:
+            risk += 7
+        elif ann_vol < 15:
+            risk -= 5
+    mdd_window = close.tail(min(len(close), 126))
+    mdd = ((mdd_window / mdd_window.cummax()) - 1).min() * 100 if len(mdd_window) >= 40 else np.nan
+    if pd.notna(mdd):
+        mdd_abs = abs(float(mdd))
+        if mdd_abs >= 35:
+            risk += 20
+            risk_reasons.append(f"deep drawdown ({mdd:.0f}%)")
+        elif mdd_abs >= 20:
+            risk += 10
+            risk_reasons.append(f"notable drawdown ({mdd:.0f}%)")
+        elif mdd_abs < 10:
+            risk -= 5
+    if pd.notna(s200) and s200:
+        ext = ((c / s200) - 1) * 100
+        if ext > 35:
+            risk += 12
+            risk_reasons.append("extended above SMA200")
+        elif ext < -20:
+            risk += 10
+            risk_reasons.append("well below SMA200")
+    if pd.notna(r) and r > 75:
+        risk += 8
+        risk_reasons.append("overbought RSI")
+    if pd.notna(c) and pd.notna(s50) and pd.notna(s200) and c < s50 < s200:
+        risk += 8
+    avg_vol20 = float(vol.tail(20).fillna(0).mean()) if len(vol) else 0.0
+    if 0 < avg_vol20 < 25000:
+        risk += 8
+        risk_reasons.append("low liquidity/volume")
+    elif avg_vol20 >= 250000:
+        risk -= 3
+    risk = max(0, min(100, int(round(risk))))
+    risk_label = "Low" if risk < 35 else "Medium" if risk < 55 else "High" if risk < 75 else "Very High"
+
     score = max(0, min(100, score))
     verdict = "SCREAMING BUY" if score >= 65 else "STRONG" if score >= 55 else "WATCH" if score >= 40 else "NEUTRAL"
     metrics = {
@@ -258,8 +312,12 @@ def analyze_history(symbol: str, name: str, df: pd.DataFrame) -> ScreenHit | Non
         "volume": None if pd.isna(v) else float(v),
         "volume20": None if pd.isna(v20) else float(v20),
         "dividend_yield_pct": dividend_yield_pct,
+        "risk": risk,
+        "risk_label": risk_label,
+        "ann_vol20_pct": None if pd.isna(ann_vol) else round(ann_vol, 1),
+        "drawdown_pct": None if pd.isna(mdd) else round(float(mdd), 1),
     }
-    return ScreenHit(symbol, name or symbol, score, verdict, round(price, 4), None if change_pct is None else round(change_pct, 2), dividend_yield_pct, reasons, metrics, _now_iso())
+    return ScreenHit(symbol, name or symbol, score, verdict, round(price, 4), None if change_pct is None else round(change_pct, 2), dividend_yield_pct, risk, risk_label, reasons, metrics, _now_iso())
 
 
 def screen_symbols(
