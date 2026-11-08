@@ -485,27 +485,41 @@ class TrayApp(QObject):
                 return
             self.show_details(None)
 
+    def _schedule_next_check(self) -> None:
+        hours = max(1, int(self.cfg.get("check_interval_hours") or 24))
+        self.timer.start(hours * 60 * 60 * 1000)
+
     def run_daily_check_if_due(self) -> None:
         results = self._results()
         hours = max(1, int(self.cfg.get("check_interval_hours") or 24))
         now = datetime.now().astimezone()
         due = False
+        oldest_age_hours = None
         for symbol in self.cfg.get("symbols", []):
             ts = (results.get(symbol) or {}).get("checked_at")
             if not ts:
                 due = True
+                oldest_age_hours = hours
                 break
             try:
                 last = datetime.fromisoformat(ts)
-                age_hours = (now - last).total_seconds() / 3600
-                if age_hours >= hours:
-                    due = True
-                    break
+                age_hours = max(0.0, (now - last).total_seconds() / 3600)
             except Exception:
                 due = True
+                oldest_age_hours = hours
                 break
+            if age_hours >= hours:
+                due = True
+                oldest_age_hours = hours
+                break
+            remaining = hours - age_hours
+            oldest_age_hours = remaining if oldest_age_hours is None else min(oldest_age_hours, remaining)
         if due:
             self.run_daily_check()
+            return
+        # Not due yet (e.g. app restarted): schedule next auto-check for the remaining interval.
+        wait_hours = hours if oldest_age_hours is None else max(1 / 60, oldest_age_hours)
+        self.timer.start(int(wait_hours * 60 * 60 * 1000))
 
     def run_daily_check(self) -> None:
         if self.check_in_progress:
@@ -528,7 +542,6 @@ class TrayApp(QObject):
             QSystemTrayIcon.MessageIcon.Information,
             5000,
         )
-        self._check_status = {s: "pending" for s in symbols}
         signals = WorkerSignals()
         signals.progress.connect(self._on_progress)
         signals.result.connect(self._on_result)
@@ -537,6 +550,7 @@ class TrayApp(QObject):
         self._active_thread = thread
         self._sync_details_status()
         thread.start()
+        self._schedule_next_check()
         # Failsafe: don't leave UI stuck if a worker misbehaves.
         QTimer.singleShot(max(30, len(symbols) * (int((self.cfg.get("ai") or {}).get("timeout_seconds") or 180) + 30)) * 1000, self._check_watchdog)
 

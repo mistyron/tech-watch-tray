@@ -6,7 +6,7 @@ A small Linux tray application for KDE/Plasma that monitors stock/security techn
 
 - Runs in the system tray (`QSystemTrayIcon` / Plasma tray).
 - Tracks a configurable list of securities (default: `XIC.TO`).
-- Asks an AI command in the background on a configurable interval (default: every 24 hours).
+- Checks **all configured securities automatically every 24 hours** (configurable) while running, and also supports manual “Check all now”. On startup it checks anything due, or schedules the next auto-check for the remaining interval.
 - Parses a simple `VERDICT`/`SUMMARY` from the response.
 - Shows a desktop notification when a verdict matches your alert set (default: `BUY`).
 - Lets you view the full response per symbol from the tray menu.
