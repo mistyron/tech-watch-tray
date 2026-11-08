@@ -8,6 +8,7 @@ from typing import Any
 from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QComboBox,
     QDialog,
@@ -190,11 +191,16 @@ class DetailsDialog(QDialog):
         self.overview_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.overview_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.overview_table.verticalHeader().setVisible(False)
+        self.overview_table.setWordWrap(False)
+        self.overview_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.overview_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         header = self.overview_table.horizontalHeader()
+        header.setStretchLastSection(False)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        self.overview_table.setColumnWidth(3, 520)
         self.overview_table.cellDoubleClicked.connect(self._open_symbol_from_overview)
         self.tabs.addTab(self.overview_table, "Overview")
 
@@ -378,15 +384,20 @@ class ScreenerDialog(QDialog):
         self.progress.setValue(0)
         layout.addWidget(self.progress)
 
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["Symbol", "Score", "Verdict", "Price", "Chg %", "Reasons"])
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(["Symbol", "Score", "Verdict", "Price", "Chg %", "Div %", "Reasons"])
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.verticalHeader().setVisible(False)
+        self.table.setWordWrap(False)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         th = self.table.horizontalHeader()
-        for i, mode in enumerate([QHeaderView.ResizeMode.ResizeToContents] * 5 + [QHeaderView.ResizeMode.Stretch]):
+        th.setStretchLastSection(False)
+        for i, mode in enumerate([QHeaderView.ResizeMode.ResizeToContents] * 6 + [QHeaderView.ResizeMode.Interactive]):
             th.setSectionResizeMode(i, mode)
+        self.table.setColumnWidth(6, 420)
         layout.addWidget(self.table)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
@@ -435,12 +446,14 @@ class ScreenerDialog(QDialog):
             row = self.table.rowCount()
             self.table.insertRow(row)
             reasons = "; ".join(hit.get("reasons") or [])
+            div = hit.get("dividend_yield_pct")
             vals = [
                 str(hit.get("symbol") or ""),
                 str(hit.get("score") or ""),
                 str(hit.get("verdict") or ""),
                 "" if hit.get("price") is None else str(hit.get("price")),
                 "" if hit.get("change_pct") is None else f"{hit.get('change_pct')}%",
+                "" if div is None else f"{div}%",
                 reasons,
             ]
             for col, val in enumerate(vals):
@@ -449,7 +462,7 @@ class ScreenerDialog(QDialog):
                     item.setForeground(Qt.GlobalColor.darkGreen)
                 if not self._hits and col in (0, 1, 2):
                     item.setForeground(Qt.GlobalColor.gray)
-                if col == 5:
+                if col == 6:
                     item.setToolTip(reasons)
                 self.table.setItem(row, col, item)
 
