@@ -5,7 +5,7 @@ from typing import Any
 
 APP_NAME = "tech-watch"
 DEFAULT_CONFIG = {
-    "symbols": ["CGL.TO", "HURA.TO"],
+    "symbols": ["XIC.TO"],
     "check_interval_hours": 24,
     "ai": {
         # Command argv list. Supported placeholders: {prompt}, {symbol}

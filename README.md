@@ -5,7 +5,7 @@ A small Linux tray application for KDE/Plasma that monitors stock/security techn
 ## What it does
 
 - Runs in the system tray (`QSystemTrayIcon` / Plasma tray).
-- Tracks a configurable list of securities (defaults: `CGL.TO`, `HURA.TO`).
+- Tracks a configurable list of securities (default: `XIC.TO`).
 - Asks an AI command in the background on a configurable interval (default: every 24 hours).
 - Parses a simple `VERDICT`/`SUMMARY` from the response.
 - Shows a desktop notification when a verdict matches your alert set (default: `BUY`).
@@ -46,7 +46,7 @@ Tray menu actions: **Manage securities...** (add/remove symbols, interval), **Se
 
 Important config fields:
 
-- `symbols`: list of tickers/symbols (e.g., `["CGL.TO", "HURA.TO", "AAPL"]`).
+- `symbols`: list of tickers/symbols (e.g., `["XIC.TO", "AAPL"]`).
 - `check_interval_hours`: how often to run checks.
 - `ai.command`: argv list for the AI CLI/command. Use `{prompt}` (and optionally `{symbol}`). Example:
   ```json
