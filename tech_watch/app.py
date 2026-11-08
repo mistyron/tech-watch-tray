@@ -9,6 +9,7 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QHBoxLayout,
@@ -22,6 +23,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QSystemTrayIcon,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -129,19 +131,76 @@ class ManageSymbolsDialog(QDialog):
 
 
 class DetailsDialog(QDialog):
-    def __init__(self, title: str, text: str, parent: QWidget | None = None):
+    def __init__(self, cfg: dict[str, Any], current_symbol: str | None = None, parent: QWidget | None = None):
         super().__init__(parent)
-        self.setWindowTitle(title)
-        self.resize(780, 560)
+        self.cfg = cfg
+        self.setWindowTitle("Tech Watch - Details")
+        self.resize(860, 620)
         layout = QVBoxLayout(self)
-        box = QPlainTextEdit()
-        box.setReadOnly(True)
-        box.setPlainText(text)
-        layout.addWidget(box)
+
+        nav = QHBoxLayout()
+        nav.addWidget(QLabel("Security:"))
+        self.symbol_box = QComboBox()
+        self.symbols = [str(s).strip().upper() for s in cfg.get("symbols", []) if str(s).strip()]
+        for s in self.symbols:
+            self.symbol_box.addItem(s)
+        nav.addWidget(self.symbol_box, 1)
+        layout.addLayout(nav)
+
+        self.tabs = QTabWidget()
+        self.summary_box = QPlainTextEdit()
+        self.summary_box.setReadOnly(True)
+        self.response_box = QPlainTextEdit()
+        self.response_box.setReadOnly(True)
+        self.tabs.addTab(self.summary_box, "Summary")
+        self.tabs.addTab(self.response_box, "AI response")
+        layout.addWidget(self.tabs)
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
         buttons.accepted.connect(self.accept)
         layout.addWidget(buttons)
+
+        self.symbol_box.currentTextChanged.connect(self._load_symbol)
+        if current_symbol and current_symbol in self.symbols:
+            self.symbol_box.setCurrentText(current_symbol)
+        elif self.symbols:
+            self._load_symbol(self.symbols[0])
+        else:
+            self.summary_box.setPlainText("No securities configured.")
+
+    def _fmt_time(self, ts: str | None) -> str:
+        if not ts:
+            return "never"
+        try:
+            dt = datetime.fromisoformat(ts)
+            return dt.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return ts
+
+    def _load_symbol(self, symbol: str) -> None:
+        symbol = (symbol or "").strip().upper()
+        results = self.cfg.get("last_results") if isinstance(self.cfg.get("last_results"), dict) else {}
+        data = results.get(symbol) or {}
+        if not data:
+            self.summary_box.setPlainText(f"Symbol: {symbol}\n\nNo analysis yet. Run 'Check all now' from the tray menu.")
+            self.response_box.setPlainText("")
+            return
+        verdict = data.get("verdict", "—")
+        summary = data.get("summary", "")
+        checked = self._fmt_time(data.get("checked_at"))
+        error = data.get("error") or ""
+        full = data.get("full_text") or ""
+        text = (
+            f"Symbol: {symbol}\n"
+            f"Verdict: {verdict}\n"
+            f"Checked: {checked}\n\n"
+            f"Summary:\n{summary}\n"
+        )
+        if error:
+            text += f"\nError:\n{error}\n"
+        self.summary_box.setPlainText(text)
+        self.response_box.setPlainText(full)
 
 
 class TrayApp(QObject):
@@ -270,11 +329,7 @@ class TrayApp(QObject):
 
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
-            symbols = self.cfg.get("symbols", [])
-            if symbols:
-                self.show_details(symbols[0])
-            else:
-                self.manage_symbols()
+            self.show_details(None)
 
     def run_daily_check_if_due(self) -> None:
         results = self._results()
@@ -411,26 +466,9 @@ class TrayApp(QObject):
             10000,
         )
 
-    def show_details(self, symbol: str) -> None:
-        data = self._results().get(symbol) or {}
-        if not data:
-            QMessageBox.information(None, f"{symbol} - Tech Watch", "No analysis yet. Run 'Check all now'.")
-            return
-        verdict = data.get("verdict", "—")
-        summary = data.get("summary", "")
-        checked = _fmt_time(data.get("checked_at"))
-        error = data.get("error") or ""
-        full = data.get("full_text") or ""
-        text = (
-            f"Symbol: {symbol}\n"
-            f"Verdict: {verdict}\n"
-            f"Checked: {checked}\n"
-            f"Summary: {summary}\n"
-        )
-        if error:
-            text += f"Error: {error}\n"
-        text += "\n--- AI response ---\n\n" + full
-        dlg = DetailsDialog(f"{symbol} - Tech Watch", text, None)
+    def show_details(self, symbol: str | None = None) -> None:
+        self.cfg = load_config()  # reflect latest saved results/command changes
+        dlg = DetailsDialog(self.cfg, symbol, None)
         dlg.exec()
 
     def show_config_location(self) -> None:
