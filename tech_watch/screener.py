@@ -24,6 +24,7 @@ class ScreenHit:
     verdict: str
     price: float | None
     change_pct: float | None
+    dividend_yield_pct: float | None
     reasons: list[str]
     metrics: dict[str, Any]
     checked_at: str
@@ -36,6 +37,7 @@ class ScreenHit:
             "verdict": self.verdict,
             "price": self.price,
             "change_pct": self.change_pct,
+            "dividend_yield_pct": self.dividend_yield_pct,
             "reasons": self.reasons,
             "metrics": self.metrics,
             "checked_at": self.checked_at,
@@ -94,8 +96,8 @@ def fetch_tsx_composite_symbols(timeout: int = 20) -> list[dict[str, str]]:
     raise RuntimeError("Could not find TSX Composite constituents table")
 
 
-def fetch_tsx_directory_symbols(limit: int = 500, timeout: int = 20) -> list[dict[str, str]]:
-    # Broader universe; can include trusts/ETFs/structured products. Caller should cap.
+def fetch_tsx_directory_symbols(limit: int = 0, timeout: int = 20) -> list[dict[str, str]]:
+    # Broader universe; can include trusts/ETFs/structured products. limit<=0 means no limit.
     url = "https://www.tsx.com/json/company-directory/search/tsx/^*"
     headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) tech-watch-tray/0.1"}
     r = requests.get(url, headers=headers, timeout=timeout)
@@ -108,16 +110,17 @@ def fetch_tsx_directory_symbols(limit: int = 500, timeout: int = 20) -> list[dic
         if not sym or not all(c.isalnum() or c in ".-" for c in sym):
             continue
         rows.append({"symbol": _to_yahoo_symbol(sym), "name": name, "source_symbol": sym})
-        if len(rows) >= limit:
+        if limit and limit > 0 and len(rows) >= limit:
             break
     return rows
 
 
-def get_universe(mode: str = "tsx_composite", limit: int = 300) -> list[dict[str, str]]:
+def get_universe(mode: str = "tsx_composite", limit: int = 0) -> list[dict[str, str]]:
     mode = (mode or "tsx_composite").strip().lower()
     if mode in ("tsx", "tsx_all", "tsx_directory"):
-        return fetch_tsx_directory_symbols(limit=max(1, limit))
-    return fetch_tsx_composite_symbols()[: max(1, limit)]
+        return fetch_tsx_directory_symbols(limit=limit)
+    rows = fetch_tsx_composite_symbols()
+    return rows if not limit or limit <= 0 else rows[: max(1, limit)]
 
 
 def _sma(s: pd.Series, n: int) -> pd.Series:
@@ -231,6 +234,18 @@ def analyze_history(symbol: str, name: str, df: pd.DataFrame) -> ScreenHit | Non
         score -= 8
         reasons.append("Weak momentum with negative price action")
 
+    dividend_yield_pct = None
+    try:
+        if "Dividends" in d.columns:
+            div = d["Dividends"].astype(float)
+            paid = div[div > 0]
+            if not paid.empty and price:
+                ttm = float(paid.tail(4).sum())
+                if ttm > 0:
+                    dividend_yield_pct = round((ttm / price) * 100, 2)
+    except Exception:
+        dividend_yield_pct = None
+
     score = max(0, min(100, score))
     verdict = "SCREAMING BUY" if score >= 65 else "STRONG" if score >= 55 else "WATCH" if score >= 40 else "NEUTRAL"
     metrics = {
@@ -242,8 +257,9 @@ def analyze_history(symbol: str, name: str, df: pd.DataFrame) -> ScreenHit | Non
         "macd_hist": None if pd.isna(mh) else round(float(mh), 6),
         "volume": None if pd.isna(v) else float(v),
         "volume20": None if pd.isna(v20) else float(v20),
+        "dividend_yield_pct": dividend_yield_pct,
     }
-    return ScreenHit(symbol, name or symbol, score, verdict, round(price, 4), None if change_pct is None else round(change_pct, 2), reasons, metrics, _now_iso())
+    return ScreenHit(symbol, name or symbol, score, verdict, round(price, 4), None if change_pct is None else round(change_pct, 2), dividend_yield_pct, reasons, metrics, _now_iso())
 
 
 def screen_symbols(
@@ -261,7 +277,7 @@ def screen_symbols(
     for batch in _chunks(symbols, max(1, batch_size)):
         tickers = " ".join(s["symbol"] for s in batch)
         try:
-            data = yf.download(tickers, period=period, interval="1d", group_by="ticker", auto_adjust=False, progress=False, threads=True)
+            data = yf.download(tickers, period=period, interval="1d", group_by="ticker", auto_adjust=False, progress=False, threads=True, actions=True)
         except Exception:
             data = pd.DataFrame()
         for meta in batch:
