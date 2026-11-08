@@ -299,6 +299,8 @@ def analyze_history(symbol: str, name: str, df: pd.DataFrame) -> ScreenHit | Non
         risk -= 3
     risk = max(0, min(100, int(round(risk))))
     risk_label = "Low" if risk < 35 else "Medium" if risk < 55 else "High" if risk < 75 else "Very High"
+    if not risk_reasons:
+        risk_reasons.append("no major technical risk flags detected")
 
     score = max(0, min(100, score))
     verdict = "SCREAMING BUY" if score >= 65 else "STRONG" if score >= 55 else "WATCH" if score >= 40 else "NEUTRAL"
@@ -314,6 +316,7 @@ def analyze_history(symbol: str, name: str, df: pd.DataFrame) -> ScreenHit | Non
         "dividend_yield_pct": dividend_yield_pct,
         "risk": risk,
         "risk_label": risk_label,
+        "risk_reasons": risk_reasons,
         "ann_vol20_pct": None if pd.isna(ann_vol) else round(ann_vol, 1),
         "drawdown_pct": None if pd.isna(mdd) else round(float(mdd), 1),
     }

@@ -465,6 +465,9 @@ class ScreenerDialog(QDialog):
                 if col == 2 and val == "SCREAMING BUY":
                     item.setForeground(Qt.GlobalColor.darkGreen)
                 if col == 3 and risk is not None:
+                    rr = (hit.get("metrics") or {}).get("risk_reasons") or []
+                    tip = f"Risk {risk_label} ({risk}/100, technical heuristic)\n" + ("\n".join(f"- {r}" for r in rr) if rr else "- no major technical risk flags detected")
+                    item.setToolTip(tip)
                     if risk >= 75:
                         item.setForeground(Qt.GlobalColor.darkRed)
                     elif risk >= 55:
