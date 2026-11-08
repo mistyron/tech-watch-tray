@@ -47,6 +47,7 @@ def _fmt_time(ts: str | None) -> str:
 
 class WorkerSignals(QObject):
     result = pyqtSignal(object)
+    progress = pyqtSignal(str, str)  # symbol, status
     finished = pyqtSignal()
 
 
@@ -59,9 +60,12 @@ class AnalysisWorker(threading.Thread):
 
     def run(self) -> None:
         try:
-            for symbol in self.symbols:
+            for i, symbol in enumerate(self.symbols):
+                self.signals.progress.emit(symbol, "updating")
                 result = query_gemini(symbol, self.cfg)
                 self.signals.result.emit(result)
+                for pending in self.symbols[i + 1 :]:
+                    self.signals.progress.emit(pending, "pending")
         finally:
             self.signals.finished.emit()
 
@@ -137,6 +141,7 @@ class DetailsDialog(QDialog):
     def __init__(self, cfg: dict[str, Any], current_symbol: str | None = None, parent: QWidget | None = None):
         super().__init__(parent)
         self.cfg = cfg
+        self.check_status: dict[str, str] = {}
         self.setWindowTitle("Tech Watch - Details")
         self.resize(940, 660)
         layout = QVBoxLayout(self)
@@ -221,6 +226,10 @@ class DetailsDialog(QDialog):
         except Exception:
             return ts
 
+    def set_check_status(self, status: dict[str, str] | None) -> None:
+        self.check_status = dict(status or {})
+        self._refresh_overview()
+
     def _refresh_overview(self) -> None:
         results = self.cfg.get("last_results") if isinstance(self.cfg.get("last_results"), dict) else {}
         self.overview_table.setRowCount(0)
@@ -229,6 +238,13 @@ class DetailsDialog(QDialog):
             verdict = str(data.get("verdict") or "—")
             checked = self._fmt_time(data.get("checked_at"))
             summary = str(data.get("summary") or "")
+            status = self.check_status.get(symbol)
+            if status == "updating":
+                verdict = "UPDATING…"
+                summary = "Check in progress…"
+            elif status == "pending":
+                verdict = "PENDING"
+                summary = summary or "Queued for update…"
             row = self.overview_table.rowCount()
             self.overview_table.insertRow(row)
             values = [symbol, verdict, checked, summary]
@@ -240,7 +256,15 @@ class DetailsDialog(QDialog):
                     item.setForeground(Qt.GlobalColor.darkRed)
                 elif col == 1 and verdict.upper() == "WAIT":
                     item.setForeground(Qt.GlobalColor.darkYellow)
-                if col == 3:
+                elif col == 1 and verdict.upper().startswith("UPDATING"):
+                    item.setForeground(QColor(61, 174, 233))
+                elif col == 1 and verdict.upper() == "PENDING":
+                    item.setForeground(Qt.GlobalColor.gray)
+                if status in {"updating", "pending"} and col in (0, 1):
+                    font = item.font()
+                    font.setItalic(True)
+                    item.setFont(font)
+                if col == 3 and summary:
                     item.setToolTip(summary)
                 self.overview_table.setItem(row, col, item)
 
@@ -287,6 +311,7 @@ class TrayApp(QObject):
         self._last_notified: dict[str, str] = {}
         self._active_thread: AnalysisWorker | None = None
         self._details_dialog: DetailsDialog | None = None
+        self._check_status: dict[str, str] = {}
         self._busy_angle = 0
         self._busy_base_icon: QIcon | None = None
 
@@ -503,14 +528,27 @@ class TrayApp(QObject):
             QSystemTrayIcon.MessageIcon.Information,
             5000,
         )
+        self._check_status = {s: "pending" for s in symbols}
         signals = WorkerSignals()
+        signals.progress.connect(self._on_progress)
         signals.result.connect(self._on_result)
         signals.finished.connect(self._on_finished)
         thread = AnalysisWorker(symbols, self.cfg, signals)
         self._active_thread = thread
+        self._sync_details_status()
         thread.start()
         # Failsafe: don't leave UI stuck if a worker misbehaves.
         QTimer.singleShot(max(30, len(symbols) * (int((self.cfg.get("ai") or {}).get("timeout_seconds") or 180) + 30)) * 1000, self._check_watchdog)
+
+    def _sync_details_status(self) -> None:
+        dlg = self._details_dialog
+        if dlg is not None and dlg.isVisible():
+            dlg.set_check_status(self._check_status)
+
+    def _on_progress(self, symbol: str, status: str) -> None:
+        if symbol:
+            self._check_status[symbol] = status
+        self._sync_details_status()
 
     def _on_result(self, result_obj: object) -> None:
         if not isinstance(result_obj, AnalysisResult):
@@ -521,8 +559,10 @@ class TrayApp(QObject):
         prev_checked = str(prev.get("checked_at") or "")
         results[result_obj.symbol] = result_obj.to_dict()
         self.cfg["last_results"] = results
+        self._check_status.pop(result_obj.symbol, None)
         self._save()
         self._rebuild_menu()
+        self._sync_details_status()
 
         notify_on = {str(v).upper() for v in (self.cfg.get("notify_on") or ["BUY"])}
         verdict = (result_obj.verdict or "").upper()
@@ -551,7 +591,9 @@ class TrayApp(QObject):
     def _on_finished(self) -> None:
         self.check_in_progress = False
         self._active_thread = None
+        self._check_status = {}
         self._rebuild_menu()
+        self._sync_details_status()
 
     def _check_watchdog(self) -> None:
         if not self.check_in_progress:
@@ -561,7 +603,9 @@ class TrayApp(QObject):
             return
         self.check_in_progress = False
         self._active_thread = None
+        self._check_status = {}
         self._rebuild_menu()
+        self._sync_details_status()
         self.tray.showMessage("Tech Watch", "Check state was reset after a stalled check.", QSystemTrayIcon.MessageIcon.Warning, 8000)
 
     def manage_symbols(self) -> None:
@@ -617,11 +661,13 @@ class TrayApp(QObject):
         dlg = self._details_dialog
         if dlg is not None and dlg.isVisible():
             dlg.update_data(self.cfg, symbol)
+            dlg.set_check_status(self._check_status)
             dlg.show()
             dlg.raise_()
             dlg.activateWindow()
             return
         dlg = DetailsDialog(self.cfg, symbol, None)
+        dlg.set_check_status(self._check_status)
         self._details_dialog = dlg
         dlg.finished.connect(self._details_closed)
         dlg.show()
