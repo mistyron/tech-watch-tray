@@ -326,7 +326,7 @@ class TrayApp(QObject):
         return self.app.windowIcon()
 
     def _busy_pixmap(self, angle: int) -> QPixmap:
-        base = self._busy_base_icon or self._icon_for_state("idle")
+        base = self._busy_base_icon or self.tray.icon() or self._icon_for_state("idle")
         size = 22
         pm = base.pixmap(size, size)
         if pm.isNull():
@@ -337,12 +337,13 @@ class TrayApp(QObject):
         p = QPainter(out)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         p.drawPixmap(0, 0, pm)
+        width = 2
         pen = QPen(QColor(61, 174, 233, 235))  # Plasma-like blue accent
-        pen.setWidth(max(2, size // 9))
+        pen.setWidth(width)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(pen)
-        margin = 1
-        rect = out.rect().adjusted(margin, margin, -margin, -margin)
+        inset = (width // 2) + 1
+        rect = out.rect().adjusted(inset, inset, -inset, -inset)
         span = 110 * 16
         start = (-angle % 360) * 16
         p.drawArc(rect, start, span)
@@ -357,7 +358,8 @@ class TrayApp(QObject):
 
     def _start_busy_indicator(self) -> None:
         self._busy_angle = 0
-        self._busy_base_icon = self._icon_for_state("idle")
+        current = self.tray.icon()
+        self._busy_base_icon = current if not current.isNull() else self._icon_for_state("idle")
         self._animate_busy_icon()
         if not self.busy_timer.isActive():
             self.busy_timer.start()
