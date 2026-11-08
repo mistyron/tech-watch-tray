@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QSpinBox,
     QSystemTrayIcon,
@@ -33,6 +34,7 @@ from PyQt6.QtWidgets import (
 
 from .config import config_path, load_config, save_config
 from .gemini import AnalysisResult, query_gemini
+from .screener import get_universe, screen_symbols
 
 
 def _fmt_time(ts: str | None) -> str:
@@ -49,6 +51,12 @@ class WorkerSignals(QObject):
     result = pyqtSignal(object)
     progress = pyqtSignal(str, str)  # symbol, status
     finished = pyqtSignal()
+
+
+class ScreenerSignals(QObject):
+    progress = pyqtSignal(int, int, str)
+    done = pyqtSignal(object)
+    error = pyqtSignal(str)
 
 
 class AnalysisWorker(threading.Thread):
@@ -68,6 +76,27 @@ class AnalysisWorker(threading.Thread):
                     self.signals.progress.emit(pending, "pending")
         finally:
             self.signals.finished.emit()
+
+
+class ScreenerWorker(threading.Thread):
+    def __init__(self, mode: str, min_score: int, limit: int, signals: ScreenerSignals):
+        super().__init__(daemon=True)
+        self.mode = mode
+        self.min_score = min_score
+        self.limit = limit
+        self.signals = signals
+
+    def run(self) -> None:
+        try:
+            universe = get_universe(self.mode, limit=self.limit)
+            hits = screen_symbols(
+                universe,
+                min_score=self.min_score,
+                progress_cb=lambda d, t, s: self.signals.progress.emit(d, t, s),
+            )
+            self.signals.done.emit({"hits": [h.to_dict() for h in hits], "scanned": len(universe), "mode": self.mode})
+        except Exception as e:
+            self.signals.error.emit(str(e))
 
 
 class ManageSymbolsDialog(QDialog):
@@ -302,6 +331,119 @@ class DetailsDialog(QDialog):
         self.response_box.setPlainText(full)
 
 
+class ScreenerDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("Tech Watch Tray - TSX Screener")
+        self.resize(980, 620)
+        self._thread: ScreenerWorker | None = None
+        self._hits: list[dict[str, Any]] = []
+
+        layout = QVBoxLayout(self)
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("Universe:"))
+        self.mode = QComboBox()
+        self.mode.addItem("TSX Composite (faster)", "tsx_composite")
+        self.mode.addItem("TSX directory sample (broader, slower)", "tsx_directory")
+        controls.addWidget(self.mode)
+        controls.addWidget(QLabel("Min score:"))
+        self.min_score = QSpinBox()
+        self.min_score.setRange(1, 100)
+        self.min_score.setValue(60)
+        controls.addWidget(self.min_score)
+        controls.addWidget(QLabel("Max symbols:"))
+        self.limit = QSpinBox()
+        self.limit.setRange(10, 2500)
+        self.limit.setSingleStep(25)
+        self.limit.setValue(221)
+        controls.addWidget(self.limit)
+        self.run_btn = QPushButton("Scan for screaming buys")
+        controls.addWidget(self.run_btn)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        self.status = QLabel("Scans TSX symbols using technicals (RSI/MACD/SMAs/volume). Not financial advice; verify before trading.")
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        layout.addWidget(self.progress)
+
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(["Symbol", "Score", "Verdict", "Price", "Chg %", "Reasons"])
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.table.verticalHeader().setVisible(False)
+        th = self.table.horizontalHeader()
+        for i, mode in enumerate([QHeaderView.ResizeMode.ResizeToContents] * 5 + [QHeaderView.ResizeMode.Stretch]):
+            th.setSectionResizeMode(i, mode)
+        layout.addWidget(self.table)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
+
+        self.run_btn.clicked.connect(self.start_scan)
+
+    def start_scan(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self.run_btn.setEnabled(False)
+        self._hits = []
+        self.table.setRowCount(0)
+        self.progress.setValue(0)
+        self.status.setText("Loading TSX universe…")
+        signals = ScreenerSignals()
+        signals.progress.connect(self.on_progress)
+        signals.done.connect(self.on_done)
+        signals.error.connect(self.on_error)
+        self._thread = ScreenerWorker(self.mode.currentData(), int(self.min_score.value()), int(self.limit.value()), signals)
+        self._thread.start()
+
+    def on_progress(self, done: int, total: int, symbol: str) -> None:
+        pct = int((done / total) * 100) if total else 0
+        self.progress.setValue(max(0, min(100, pct)))
+        self.status.setText(f"Scanning {done}/{total}: {symbol}")
+
+    def on_done(self, payload: object) -> None:
+        self.run_btn.setEnabled(True)
+        self.progress.setValue(100)
+        if not isinstance(payload, dict):
+            self.status.setText("Scan finished.")
+            return
+        self._hits = payload.get("hits") or []
+        scanned = payload.get("scanned") or 0
+        self.status.setText(f"Scanned {scanned} symbols. Found {len(self._hits)} match(es) with score >= {self.min_score.value()}.")
+        for hit in self._hits:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            reasons = "; ".join(hit.get("reasons") or [])
+            vals = [
+                str(hit.get("symbol") or ""),
+                str(hit.get("score") or ""),
+                str(hit.get("verdict") or ""),
+                "" if hit.get("price") is None else str(hit.get("price")),
+                "" if hit.get("change_pct") is None else f"{hit.get('change_pct')}%",
+                reasons,
+            ]
+            for col, val in enumerate(vals):
+                item = QTableWidgetItem(val)
+                if col == 2 and val == "SCREAMING BUY":
+                    item.setForeground(Qt.GlobalColor.darkGreen)
+                if col == 5:
+                    item.setToolTip(reasons)
+                self.table.setItem(row, col, item)
+
+    def on_error(self, msg: str) -> None:
+        self.run_btn.setEnabled(True)
+        self.progress.setValue(0)
+        self.status.setText(f"Scan failed: {msg}")
+        QMessageBox.warning(self, "Tech Watch Tray - TSX Screener", msg)
+
+
 class TrayApp(QObject):
     def __init__(self, app: QApplication):
         super().__init__()
@@ -311,6 +453,7 @@ class TrayApp(QObject):
         self._last_notified: dict[str, str] = {}
         self._active_thread: AnalysisWorker | None = None
         self._details_dialog: DetailsDialog | None = None
+        self._screener_dialog: ScreenerDialog | None = None
         self._check_status: dict[str, str] = {}
         self._busy_angle = 0
         self._busy_base_icon: QIcon | None = None
@@ -419,6 +562,10 @@ class TrayApp(QObject):
         ai_act = QAction("Set AI command...", self.menu)
         ai_act.triggered.connect(self.set_ai_command)
         self.menu.addAction(ai_act)
+
+        scan_act = QAction("Scan TSX for screaming buys...", self.menu)
+        scan_act.triggered.connect(self.show_screener)
+        self.menu.addAction(scan_act)
 
         config_act = QAction("Open config file location", self.menu)
         config_act.triggered.connect(self.show_config_location)
@@ -691,6 +838,20 @@ class TrayApp(QObject):
     def show_config_location(self) -> None:
         path = str(config_path())
         self.tray.showMessage("Tech Watch Tray config", path, QSystemTrayIcon.MessageIcon.Information, 10000)
+
+    def show_screener(self) -> None:
+        dlg = self._screener_dialog
+        if dlg is not None and dlg.isVisible():
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
+            return
+        dlg = ScreenerDialog(None)
+        self._screener_dialog = dlg
+        dlg.finished.connect(lambda *_: setattr(self, "_screener_dialog", None))
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
 
 def main(argv: list[str] | None = None) -> int:
