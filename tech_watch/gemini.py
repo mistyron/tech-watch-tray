@@ -160,10 +160,11 @@ def query_gemini(symbol: str, cfg: dict[str, Any], timeout: int | None = None) -
     err = (proc.stderr or "").strip()
     text = out if out else err
     if proc.returncode != 0 and not out:
-        return AnalysisResult(symbol, "ERROR", _friendly_error(err or text)[:200], text, False, err or f"exit code {proc.returncode}", checked_at)
+        friendly = _friendly_error(err or text)
+        return AnalysisResult(symbol, "ERROR", friendly[:240], text, False, friendly, checked_at)
     verdict, summary = parse_analysis(symbol, text)
     ok = proc.returncode == 0 or bool(out)
     if verdict == "UNKNOWN" and proc.returncode != 0:
         ok = False
-    return AnalysisResult(symbol, verdict, summary or "(no summary)", text, ok, err if proc.returncode != 0 else "", checked_at)
+    return AnalysisResult(symbol, verdict, summary or "(no summary)", text, ok, _friendly_error(err) if proc.returncode != 0 and err else "", checked_at)
 

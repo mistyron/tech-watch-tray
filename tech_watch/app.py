@@ -351,11 +351,14 @@ class TrayApp(QObject):
                 15000,
             )
         elif not result_obj.ok:
+            msg = result_obj.summary or result_obj.error or "Check failed"
+            if result_obj.error and result_obj.error not in msg and "IneligibleTierError" not in msg:
+                msg = f"{msg}\n{(result_obj.error[:180] + '…') if len(result_obj.error) > 180 else result_obj.error}"
             self.tray.showMessage(
                 f"Tech Watch: {result_obj.symbol}",
-                f"Check failed: {result_obj.error or result_obj.summary}",
+                f"Check failed: {msg}",
                 QSystemTrayIcon.MessageIcon.Critical,
-                12000,
+                15000,
             )
 
     def _on_finished(self) -> None:
