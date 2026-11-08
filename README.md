@@ -63,12 +63,16 @@ Important config fields:
 
 ### `IneligibleTierError` / "Gemini Code Assist for individuals ... migrate to Antigravity"
 
-This error comes from the **Gemini CLI** (`gemini`), not from Tech Watch. Tech Watch shells out to the configured command; if that command fails, the tray shows its error.
+This error comes from the **Gemini CLI** (`gemini`), not from Tech Watch. Your `~/.config/tech-watch/config.json` still points to `gemini` unless you change `ai.command`, and a running tray app must be **restarted** to pick up code/config changes.
 
 Fix options:
-1. **Use a working Gemini-capable CLI for your account** (e.g. Antigravity's CLI if you have it installed) and set `ai.command` accordingly via **Set AI command...** or in `~/.config/tech-watch/config.json`. Test the command in a terminal first, e.g. `your-command -p "Reply with OK"`.
-2. **Use an API-based wrapper script**: create a small script that calls the Gemini API/provider you have access to, prints the model text to stdout, and configure `ai.command` to run it (e.g. `["/path/to/my-gemini-query.sh", "{prompt}"]`). Keep API keys out of the repo/config if the file is shared.
-3. Re-auth/update your Gemini CLI setup per Google's current guidance: https://antigravity.google (availability depends on your account/product). Tech Watch will work again once `gemini -p "hello"` succeeds.
+1. **Antigravity CLI (`agy`)** — Google’s migration path; official Linux install (Fedora supported): `curl -fsSL https://antigravity.google/cli/install.sh | bash` (installs to `~/.local/bin/agy`). Verify with `agy --version` and a prompt test, then set `ai.command` to e.g. `["agy", "-p", "{prompt}"]` (confirm flags with `agy --help`). Review the installer/docs before running any remote script: https://antigravity.google/docs/cli/install
+2. **`aichat` / OpenRouter or another configured provider** — if you already have `aichat` working, set `ai.command` to a non-streaming command that prints the response, e.g.:
+   ```json
+   "ai": { "command": ["/usr/local/sbin/aichat", "-S", "-m", "openrouter:openrouter/free", "{prompt}"] }
+   ```
+   Use `-S` (no stream). OpenRouter free models change/ratelimit; `openrouter/free` routes to an available free model but quality/availability varies — test: `aichat -S -m openrouter:openrouter/free "Reply with OK"`.
+3. **API-based wrapper script**: a small script that calls a provider you’re authorized to use, prints model text to stdout, configured as `["/path/to/wrapper.sh","{prompt}"]`. Keep API keys out of shared config/repos.
 
 ## Autostart on Plasma login (optional)
 
