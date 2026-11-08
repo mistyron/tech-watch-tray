@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 
 from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -287,6 +287,8 @@ class TrayApp(QObject):
         self._last_notified: dict[str, str] = {}
         self._active_thread: AnalysisWorker | None = None
         self._details_dialog: DetailsDialog | None = None
+        self._busy_angle = 0
+        self._busy_base_icon: QIcon | None = None
 
         self.tray = QSystemTrayIcon(self._icon_for_state("idle"))
         self.tray.setToolTip("Tech Watch: idle")
@@ -297,6 +299,10 @@ class TrayApp(QObject):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.run_daily_check)
         self._apply_timer()
+
+        self.busy_timer = QTimer(self)
+        self.busy_timer.setInterval(120)
+        self.busy_timer.timeout.connect(self._animate_busy_icon)
 
         self._rebuild_menu()
         self.tray.show()
@@ -318,6 +324,47 @@ class TrayApp(QObject):
             if not icon.isNull():
                 return icon
         return self.app.windowIcon()
+
+    def _busy_pixmap(self, angle: int) -> QPixmap:
+        base = self._busy_base_icon or self._icon_for_state("idle")
+        size = 22
+        pm = base.pixmap(size, size)
+        if pm.isNull():
+            pm = QPixmap(size, size)
+            pm.fill(Qt.GlobalColor.transparent)
+        out = QPixmap(pm.size())
+        out.fill(Qt.GlobalColor.transparent)
+        p = QPainter(out)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.drawPixmap(0, 0, pm)
+        pen = QPen(QColor(61, 174, 233, 235))  # Plasma-like blue accent
+        pen.setWidth(max(2, size // 9))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        margin = 1
+        rect = out.rect().adjusted(margin, margin, -margin, -margin)
+        span = 110 * 16
+        start = (-angle % 360) * 16
+        p.drawArc(rect, start, span)
+        p.end()
+        return out
+
+    def _animate_busy_icon(self) -> None:
+        if not self.check_in_progress:
+            return
+        self._busy_angle = (self._busy_angle + 30) % 360
+        self.tray.setIcon(QIcon(self._busy_pixmap(self._busy_angle)))
+
+    def _start_busy_indicator(self) -> None:
+        self._busy_angle = 0
+        self._busy_base_icon = self._icon_for_state("idle")
+        self._animate_busy_icon()
+        if not self.busy_timer.isActive():
+            self.busy_timer.start()
+
+    def _stop_busy_indicator(self) -> None:
+        if self.busy_timer.isActive():
+            self.busy_timer.stop()
 
     def _save(self) -> None:
         save_config(self.cfg)
@@ -380,10 +427,10 @@ class TrayApp(QObject):
 
     def _update_tray_state(self) -> None:
         if self.check_in_progress:
-            self.tray.setIcon(self._icon_for_state("checking"))
             self.tray.setToolTip("Tech Watch: checking AI…")
             return
 
+        self._stop_busy_indicator()
         results = self._results()
         notify_on = {str(v).upper() for v in (self.cfg.get("notify_on") or ["BUY"])}
         alert = False
@@ -447,6 +494,7 @@ class TrayApp(QObject):
             return
         self.check_in_progress = True
         self._update_tray_state()
+        self._start_busy_indicator()
         self.tray.showMessage(
             "Tech Watch",
             f"Checking technicals for: {', '.join(symbols)}",
