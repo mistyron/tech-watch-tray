@@ -1,12 +1,13 @@
 import html
+import math
 import signal
 import sys
 import threading
 from datetime import datetime
 from typing import Any
 
-from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
+from PyQt6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QAction, QBrush, QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -46,6 +47,83 @@ def _fmt_time(ts: str | None) -> str:
         return dt.strftime("%Y-%m-%d %H:%M")
     except Exception:
         return ts
+
+
+def _tray_icon_pixmap(state: str, size: int = 64) -> QPixmap:
+    states = {
+        "idle": {"bg": QColor(52, 73, 94), "fg": QColor(236, 240, 241), "accent": QColor(149, 165, 166)},
+        "checking": {"bg": QColor(41, 128, 185), "fg": QColor(236, 240, 241), "accent": QColor(174, 214, 241)},
+        "alert": {"bg": QColor(39, 174, 96), "fg": QColor(255, 255, 255), "accent": QColor(213, 245, 227)},
+        "error": {"bg": QColor(192, 57, 43), "fg": QColor(255, 255, 255), "accent": QColor(245, 183, 177)},
+        "ok": {"bg": QColor(44, 62, 80), "fg": QColor(236, 240, 241), "accent": QColor(46, 204, 113)},
+    }
+    colors = states.get(state, states["idle"])
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+    pad = max(1, size // 16)
+    rect = QRectF(pad, pad, size - 2 * pad, size - 2 * pad)
+    radius = size * 0.22
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(colors["bg"]))
+    p.drawRoundedRect(rect, radius, radius)
+
+    # Subtle monitor/chart frame
+    chart = rect.adjusted(size * 0.16, size * 0.20, -size * 0.16, -size * 0.22)
+    p.setPen(QPen(QColor(255, 255, 255, 45), max(1, size // 32)))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawRoundedRect(chart, size * 0.06, size * 0.06)
+
+    # Trend line / candlestick-like bars to suggest "tech watch"
+    x0 = chart.left() + chart.width() * 0.12
+    x1 = chart.right() - chart.width() * 0.12
+    base = chart.bottom() - chart.height() * 0.18
+    top = chart.top() + chart.height() * 0.18
+    points = [
+        QPointF(x0, base - chart.height() * 0.18),
+        QPointF(x0 + (x1 - x0) * 0.33, base - chart.height() * 0.38),
+        QPointF(x0 + (x1 - x0) * 0.62, base - chart.height() * 0.28),
+        QPointF(x1, top + chart.height() * 0.08),
+    ]
+    path = QPainterPath(points[0])
+    for pt in points[1:]:
+        path.lineTo(pt)
+    p.setPen(QPen(colors["fg"], max(1.5, size * 0.055), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    p.drawPath(path)
+
+    # End marker colored by state accent
+    marker_r = max(1.8, size * 0.055)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(colors["accent"]))
+    p.drawEllipse(points[-1], marker_r, marker_r)
+
+    if state == "alert":
+        # Small upward tick
+        p.setPen(QPen(QColor(255, 255, 255, 230), max(1.5, size * 0.05), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        cx = rect.right() - size * 0.18
+        cy = rect.top() + size * 0.18
+        d = size * 0.055
+        p.drawLine(QPointF(cx - d, cy + d * 0.2), QPointF(cx - d * 0.1, cy + d))
+        p.drawLine(QPointF(cx - d * 0.1, cy + d), QPointF(cx + d, cy - d * 0.6))
+    elif state == "error":
+        p.setPen(QPen(QColor(255, 255, 255, 230), max(1.5, size * 0.05), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        cx = rect.right() - size * 0.18
+        cy = rect.top() + size * 0.18
+        d = size * 0.055
+        p.drawLine(QPointF(cx - d, cy - d), QPointF(cx + d, cy + d))
+        p.drawLine(QPointF(cx - d, cy + d), QPointF(cx + d, cy - d))
+
+    p.end()
+    return pm
+
+
+def _tray_icon(state: str) -> QIcon:
+    icon = QIcon()
+    for size in (16, 22, 24, 32, 48, 64):
+        icon.addPixmap(_tray_icon_pixmap(state, size))
+    return icon
 
 
 class WorkerSignals(QObject):
@@ -111,6 +189,7 @@ class ScreenerWorker(threading.Thread):
 class ManageSymbolsDialog(QDialog):
     def __init__(self, cfg: dict[str, Any], parent: QWidget | None = None):
         super().__init__(parent)
+        self.setWindowIcon(_tray_icon("idle"))
         self.setWindowTitle("Tech Watch Tray - Securities")
         self.cfg = cfg
         self.resize(420, 360)
@@ -178,6 +257,7 @@ class ManageSymbolsDialog(QDialog):
 class DetailsDialog(QDialog):
     def __init__(self, cfg: dict[str, Any], current_symbol: str | None = None, parent: QWidget | None = None):
         super().__init__(parent)
+        self.setWindowIcon(_tray_icon("idle"))
         self.cfg = cfg
         self.check_status: dict[str, str] = {}
         self.setWindowTitle("Tech Watch Tray - Details")
@@ -271,6 +351,9 @@ class DetailsDialog(QDialog):
     def set_check_status(self, status: dict[str, str] | None) -> None:
         self.check_status = dict(status or {})
         self._refresh_overview()
+        current = self.symbol_box.currentText().strip().upper()
+        if current:
+            self._load_symbol(current)
 
     def _refresh_overview(self) -> None:
         results = self.cfg.get("last_results") if isinstance(self.cfg.get("last_results"), dict) else {}
@@ -347,6 +430,7 @@ class DetailsDialog(QDialog):
 class ScreenerDialog(QDialog):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
+        self.setWindowIcon(_tray_icon("idle"))
         self.setWindowTitle("Tech Watch Tray - TSX Screener")
         self.resize(980, 620)
         self._thread: ScreenerWorker | None = None
@@ -522,42 +606,28 @@ class TrayApp(QObject):
         QTimer.singleShot(15_000, self.run_daily_check_if_due)
 
     def _icon_for_state(self, state: str) -> QIcon:
-        # Use theme icons for portability in KDE/Plasma.
-        names = {
-            "idle": ["view-refresh", "clock", "utilities-system-monitor"],
-            "checking": ["process-working", "view-refresh", "system-run"],
-            "alert": ["dialog-warning", "emblem-important", "flag-yellow"],
-            "error": ["dialog-error", "process-stop"],
-            "ok": ["dialog-information", "security-high"],
-        }
-        for name in names.get(state, names["idle"]):
-            icon = QIcon.fromTheme(name)
-            if not icon.isNull():
-                return icon
-        return self.app.windowIcon()
+        return _tray_icon(state)
 
     def _busy_pixmap(self, angle: int) -> QPixmap:
-        base = self._busy_base_icon or self.tray.icon() or self._icon_for_state("idle")
-        size = 22
+        base = self._busy_base_icon or self.tray.icon() or self._icon_for_state("checking")
+        size = 64
         pm = base.pixmap(size, size)
         if pm.isNull():
-            pm = QPixmap(size, size)
-            pm.fill(Qt.GlobalColor.transparent)
+            pm = _tray_icon_pixmap("checking", size)
         out = QPixmap(pm.size())
         out.fill(Qt.GlobalColor.transparent)
         p = QPainter(out)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         p.drawPixmap(0, 0, pm)
-        width = 2
-        pen = QPen(QColor(61, 174, 233, 235))  # Plasma-like blue accent
+        width = max(2, size // 14)
+        pen = QPen(QColor(236, 240, 241, 235))
         pen.setWidth(width)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(pen)
-        inset = (width // 2) + 1
+        inset = width + max(1, size // 20)
         rect = out.rect().adjusted(inset, inset, -inset, -inset)
-        span = 110 * 16
         start = (-angle % 360) * 16
-        p.drawArc(rect, start, span)
+        p.drawArc(rect, start, 110 * 16)
         p.end()
         return out
 
@@ -749,6 +819,11 @@ class TrayApp(QObject):
         if dlg is not None and dlg.isVisible():
             dlg.set_check_status(self._check_status)
 
+    def _refresh_details_data(self) -> None:
+        dlg = self._details_dialog
+        if dlg is not None and dlg.isVisible():
+            dlg.update_data(self.cfg)
+
     def _on_progress(self, symbol: str, status: str) -> None:
         if symbol:
             self._check_status[symbol] = status
@@ -766,7 +841,7 @@ class TrayApp(QObject):
         self._check_status.pop(result_obj.symbol, None)
         self._save()
         self._rebuild_menu()
-        self._sync_details_status()
+        self._refresh_details_data()
 
         notify_on = {str(v).upper() for v in (self.cfg.get("notify_on") or ["BUY"])}
         verdict = (result_obj.verdict or "").upper()
@@ -797,7 +872,7 @@ class TrayApp(QObject):
         self._active_thread = None
         self._check_status = {}
         self._rebuild_menu()
-        self._sync_details_status()
+        self._refresh_details_data()
 
     def _check_watchdog(self) -> None:
         if not self.check_in_progress:
@@ -809,7 +884,7 @@ class TrayApp(QObject):
         self._active_thread = None
         self._check_status = {}
         self._rebuild_menu()
-        self._sync_details_status()
+        self._refresh_details_data()
         self.tray.showMessage("Tech Watch Tray", "Check state was reset after a stalled check.", QSystemTrayIcon.MessageIcon.Warning, 8000)
 
     def manage_symbols(self) -> None:
@@ -903,6 +978,7 @@ def main(argv: list[str] | None = None) -> int:
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("Tech Watch Tray")
     app.setOrganizationName("Tech Watch Tray")
+    app.setWindowIcon(_tray_icon("idle"))
 
     if not QSystemTrayIcon.isSystemTrayAvailable():
         QMessageBox.critical(

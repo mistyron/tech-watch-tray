@@ -11,6 +11,20 @@ DEFAULT_CONFIG = {
         # Command argv list. Supported placeholders: {prompt}, {symbol}
         "command": ["gemini", "-p", "{prompt}"],
         "timeout_seconds": 180,
+        # When the primary command is `agy`/Antigravity and fails with quota/rate/resource errors,
+        # try these models in order before falling back to Ollama.
+        "agy_fallback_models": [
+            "gpt-oss-120b-medium",
+            "claude-sonnet-4-6",
+            "gemini-3.8-flash-medium",
+            "gemini-3.8-flash-low",
+        ],
+        # Ollama fallback uses live Yahoo Finance technical data + a small local model.
+        # It runs automatically when provider/model fallbacks fail with quota/rate/auth/resource errors.
+        "fallback_on_quota": True,
+        "ollama_command": "ollama",
+        "ollama_model": "llama3.2:1b",
+        "ollama_timeout_seconds": 180,
     },
     # Legacy/backward-compat fields (used if ai.command is absent/invalid)
     "gemini_command": "gemini",
@@ -20,7 +34,9 @@ DEFAULT_CONFIG = {
         "RSI, MACD, volume, and key support/resistance if available). "
         "I already hold this security. Based on the technicals right now, is it promising to add "
         "capital to my existing holding, or should I wait and see?\n\n"
-        "Be specific and practical. End your response with exactly these two lines:\n"
+        "Be specific and practical. Use BUY only when adding capital now is justified; if adding "
+        "should wait for a breakout/confirmation/trigger, use WAIT.\n"
+        "End your response with exactly these two lines (VERDICT must be consistent with your analysis):\n"
         "VERDICT: BUY|WAIT|HOLD|SELL\n"
         "SUMMARY: <one short sentence>"
     ),
