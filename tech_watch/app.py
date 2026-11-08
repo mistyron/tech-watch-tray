@@ -134,7 +134,7 @@ def _tray_icon(state: str) -> QIcon:
 
 class WorkerSignals(QObject):
     result = pyqtSignal(object)
-    progress = pyqtSignal(str, str)  # symbol, status
+    progress = pyqtSignal(str, str)  # symbol, detail
     finished = pyqtSignal()
 
 
@@ -152,10 +152,14 @@ class AnalysisWorker(threading.Thread):
         self.signals = signals
 
     def run(self) -> None:
+        def progress(detail: str, sym: str = "") -> None:
+            self.signals.progress.emit(sym or "", detail)
+
         try:
             for i, symbol in enumerate(self.symbols):
-                self.signals.progress.emit(symbol, "updating")
-                result = query_gemini(symbol, self.cfg)
+                self.signals.progress.emit(symbol, "preparing check")
+                result = query_gemini(symbol, self.cfg, progress=progress)
+                self.signals.progress.emit(symbol, "formatting reply")
                 self.signals.result.emit(result)
                 for pending in self.symbols[i + 1 :]:
                     self.signals.progress.emit(pending, "pending")
