@@ -199,8 +199,7 @@ class DetailsDialog(QDialog):
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
-        self.overview_table.setColumnWidth(3, 520)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self.overview_table.cellDoubleClicked.connect(self._open_symbol_from_overview)
         self.tabs.addTab(self.overview_table, "Overview")
 
@@ -397,9 +396,8 @@ class ScreenerDialog(QDialog):
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         th = self.table.horizontalHeader()
         th.setStretchLastSection(False)
-        for i, mode in enumerate([QHeaderView.ResizeMode.ResizeToContents] * 6 + [QHeaderView.ResizeMode.Interactive]):
-            th.setSectionResizeMode(i, mode)
-        self.table.setColumnWidth(6, 420)
+        for i in range(7):
+            th.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.table)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
