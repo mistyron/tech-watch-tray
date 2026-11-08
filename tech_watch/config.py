@@ -7,6 +7,7 @@ APP_NAME = "tech-watch"
 DEFAULT_CONFIG = {
     "symbols": ["XIC.TO"],
     "check_interval_hours": 24,
+    "check_on_startup": "due",  # due | always | never
     "ai": {
         # Command argv list. Supported placeholders: {prompt}, {symbol}
         "command": ["gemini", "-p", "{prompt}"],
@@ -87,8 +88,12 @@ def load_config() -> dict[str, Any]:
         merged["last_results"] = {}
     if not isinstance(merged.get("notify_on"), list):
         merged["notify_on"] = DEFAULT_CONFIG["notify_on"][:]
+    mode = str(merged.get("check_on_startup") or "due").strip().lower()
+    merged["check_on_startup"] = mode if mode in {"due", "always", "never"} else "due"
     if not isinstance(merged.get("ai", {}).get("command"), list):
         merged.setdefault("ai", {})["command"] = DEFAULT_CONFIG["ai"]["command"][:]
+    if not isinstance(merged.get("ai", {}).get("agy_fallback_models"), list):
+        merged.setdefault("ai", {})["agy_fallback_models"] = DEFAULT_CONFIG["ai"]["agy_fallback_models"][:]
     return merged
 
 

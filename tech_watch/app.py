@@ -1,5 +1,6 @@
 import html
 import math
+import shlex
 import signal
 import sys
 import threading
@@ -11,13 +12,17 @@ from PyQt6.QtGui import QAction, QBrush, QColor, QIcon, QPainter, QPainterPath, 
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMenu,
@@ -25,6 +30,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QSystemTrayIcon,
     QTableWidget,
@@ -304,6 +310,12 @@ class DetailsDialog(QDialog):
         self.tabs.addTab(symbol_page, "Security details")
         layout.addWidget(self.tabs)
 
+        self.status_label = QLabel("Ready")
+        self.status_label.setWordWrap(True)
+        self.status_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.status_label.setStyleSheet("QLabel { padding: 4px 6px; color: palette(mid); }")
+        layout.addWidget(self.status_label)
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
         buttons.accepted.connect(self.accept)
@@ -336,6 +348,7 @@ class DetailsDialog(QDialog):
         else:
             self.summary_box.setPlainText("No securities configured.")
             self.response_box.setPlainText("")
+        self._update_status_bar()
         if symbol:
             self.tabs.setCurrentIndex(1)
 
@@ -351,9 +364,35 @@ class DetailsDialog(QDialog):
     def set_check_status(self, status: dict[str, str] | None) -> None:
         self.check_status = dict(status or {})
         self._refresh_overview()
+        self._update_status_bar()
         current = self.symbol_box.currentText().strip().upper()
         if current:
             self._load_symbol(current)
+
+    def _update_status_bar(self) -> None:
+        status = self.check_status
+        if not status:
+            self.status_label.setText("Ready")
+            return
+        parts = []
+        for sym in self.symbols:
+            st = status.get(sym)
+            if not st:
+                continue
+            label = st
+            if st == "updating":
+                label = "updating"
+            elif st == "pending":
+                label = "pending"
+            parts.append(f"{sym}: {label}")
+        # include any symbols with status not in current symbol list
+        for sym, st in status.items():
+            if sym not in self.symbols:
+                parts.append(f"{sym}: {st}")
+        if parts:
+            self.status_label.setText("Checking — " + " | ".join(parts))
+        else:
+            self.status_label.setText("Ready")
 
     def _refresh_overview(self) -> None:
         results = self.cfg.get("last_results") if isinstance(self.cfg.get("last_results"), dict) else {}
@@ -425,6 +464,146 @@ class DetailsDialog(QDialog):
             text += f"\nError:\n{error}\n"
         self.summary_box.setPlainText(text)
         self.response_box.setPlainText(full)
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, cfg: dict[str, Any], parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowIcon(_tray_icon("idle"))
+        self.setWindowTitle("Tech Watch Tray - Settings")
+        self.resize(760, 720)
+        self._cfg = cfg
+
+        root = QVBoxLayout(self)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        root.addWidget(scroll)
+        body = QWidget()
+        scroll.setWidget(body)
+        layout = QVBoxLayout(body)
+
+        general = QGroupBox("General")
+        gform = QFormLayout(general)
+        self.symbols_edit = QLineEdit(", ".join(str(s) for s in cfg.get("symbols", []) if str(s).strip()))
+        self.symbols_edit.setPlaceholderText("e.g. CGL.TO, HURA.TO, XIC.TO")
+        gform.addRow("Symbols (comma-separated):", self.symbols_edit)
+        self.interval = QSpinBox()
+        self.interval.setRange(1, 168)
+        self.interval.setValue(max(1, int(cfg.get("check_interval_hours") or 24)))
+        gform.addRow("Check interval (hours):", self.interval)
+        self.startup_mode = QComboBox()
+        self.startup_mode.addItem("Only when due (recommended)", "due")
+        self.startup_mode.addItem("Always check on startup", "always")
+        self.startup_mode.addItem("Never check on startup", "never")
+        cur_start = str(cfg.get("check_on_startup") or "due").strip().lower()
+        idx = self.startup_mode.findData(cur_start)
+        if idx >= 0:
+            self.startup_mode.setCurrentIndex(idx)
+        gform.addRow("On startup:", self.startup_mode)
+        self.notify_on = QLineEdit(", ".join(str(v).upper() for v in (cfg.get("notify_on") or ["BUY"])))
+        self.notify_on.setPlaceholderText("BUY, WAIT, HOLD, SELL")
+        gform.addRow("Notify on verdicts:", self.notify_on)
+        layout.addWidget(general)
+
+        ai_cfg = cfg.get("ai") if isinstance(cfg.get("ai"), dict) else {}
+        ai = QGroupBox("AI command / fallbacks")
+        aform = QFormLayout(ai)
+        cmd = ai_cfg.get("command") or ["gemini", "-p", "{prompt}"]
+        try:
+            cmd_s = shlex.join([str(x) for x in cmd])
+        except Exception:
+            cmd_s = 'gemini -p "{prompt}"'
+        self.ai_command = QLineEdit(cmd_s)
+        self.ai_command.setPlaceholderText('agy -p {prompt}  (use {prompt}, optional {symbol})')
+        aform.addRow("Primary command:", self.ai_command)
+        self.ai_timeout = QSpinBox()
+        self.ai_timeout.setRange(10, 3600)
+        self.ai_timeout.setValue(max(10, int(ai_cfg.get("timeout_seconds") or 180)))
+        aform.addRow("Primary timeout (s):", self.ai_timeout)
+        agy_models = ai_cfg.get("agy_fallback_models") if isinstance(ai_cfg.get("agy_fallback_models"), list) else []
+        self.agy_models = QLineEdit(", ".join(str(m).strip() for m in agy_models if str(m).strip()))
+        self.agy_models.setPlaceholderText("gpt-oss-120b-medium, claude-sonnet-4-6, ...")
+        aform.addRow("agy fallback models:", self.agy_models)
+        self.fallback_quota = QCheckBox("Use fallbacks on quota/rate/auth/resource errors")
+        self.fallback_quota.setChecked(bool(ai_cfg.get("fallback_on_quota", True)))
+        aform.addRow("", self.fallback_quota)
+        self.ollama_command = QLineEdit(str(ai_cfg.get("ollama_command") or "ollama"))
+        aform.addRow("Ollama command:", self.ollama_command)
+        self.ollama_model = QLineEdit(str(ai_cfg.get("ollama_model") or "llama3.2:1b"))
+        aform.addRow("Ollama model:", self.ollama_model)
+        self.ollama_timeout = QSpinBox()
+        self.ollama_timeout.setRange(10, 3600)
+        self.ollama_timeout.setValue(max(10, int(ai_cfg.get("ollama_timeout_seconds") or 180)))
+        aform.addRow("Ollama timeout (s):", self.ollama_timeout)
+        layout.addWidget(ai)
+
+        prompt = QGroupBox("Prompt template")
+        pbox = QVBoxLayout(prompt)
+        pbox.addWidget(QLabel("Use {symbol} placeholder. Include VERDICT: BUY|WAIT|HOLD|SELL and SUMMARY: lines for parsing."))
+        self.prompt = QPlainTextEdit()
+        self.prompt.setPlainText(str(cfg.get("query_template") or ""))
+        self.prompt.setMinimumHeight(180)
+        pbox.addWidget(self.prompt)
+        layout.addWidget(prompt)
+
+        path = QLabel(f"Config file: {config_path()}")
+        path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        path.setWordWrap(True)
+        layout.addWidget(path)
+        layout.addStretch(1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def _accept(self) -> None:
+        try:
+            parts = shlex.split(self.ai_command.text().strip())
+        except Exception as e:
+            QMessageBox.warning(self, "Settings", f"Could not parse primary command: {e}")
+            return
+        if not parts:
+            QMessageBox.warning(self, "Settings", "Primary AI command cannot be empty.")
+            return
+        if not any("{prompt}" in p for p in parts):
+            parts.append("{prompt}")
+        symbols = []
+        for s in self.symbols_edit.text().split(","):
+            sym = s.strip().upper()
+            if sym and sym not in symbols:
+                symbols.append(sym)
+        notify = []
+        for v in self.notify_on.text().split(","):
+            vv = v.strip().upper()
+            if vv and vv not in notify:
+                notify.append(vv)
+        agy_models = []
+        for m in self.agy_models.text().split(","):
+            mm = m.strip()
+            if mm and mm not in agy_models:
+                agy_models.append(mm)
+        template = self.prompt.toPlainText().strip()
+        if "{symbol}" not in template:
+            QMessageBox.warning(self, "Settings", "Prompt template must include {symbol}.")
+            return
+        self._cfg["symbols"] = symbols
+        self._cfg["check_interval_hours"] = int(self.interval.value())
+        self._cfg["check_on_startup"] = self.startup_mode.currentData() or "due"
+        self._cfg["notify_on"] = notify or ["BUY"]
+        self._cfg["query_template"] = template
+        ai = self._cfg.setdefault("ai", {})
+        ai["command"] = parts
+        ai["timeout_seconds"] = int(self.ai_timeout.value())
+        ai["agy_fallback_models"] = agy_models
+        ai["fallback_on_quota"] = bool(self.fallback_quota.isChecked())
+        ai["ollama_command"] = self.ollama_command.text().strip() or "ollama"
+        ai["ollama_model"] = self.ollama_model.text().strip() or "llama3.2:1b"
+        ai["ollama_timeout_seconds"] = int(self.ollama_timeout.value())
+        self.accept()
+
+    def result_config(self) -> dict[str, Any]:
+        return self._cfg
 
 
 class ScreenerDialog(QDialog):
@@ -581,6 +760,7 @@ class TrayApp(QObject):
         self._active_thread: AnalysisWorker | None = None
         self._details_dialog: DetailsDialog | None = None
         self._screener_dialog: ScreenerDialog | None = None
+        self._settings_dialog: SettingsDialog | None = None
         self._check_status: dict[str, str] = {}
         self._busy_angle = 0
         self._busy_base_icon: QIcon | None = None
@@ -668,13 +848,9 @@ class TrayApp(QObject):
         header.setEnabled(not self.check_in_progress)
         self.menu.addAction(header)
 
-        manage = QAction("Manage securities...", self.menu)
-        manage.triggered.connect(self.manage_symbols)
-        self.menu.addAction(manage)
-
-        ai_act = QAction("Set AI command...", self.menu)
-        ai_act.triggered.connect(self.set_ai_command)
-        self.menu.addAction(ai_act)
+        settings_act = QAction("Settings...", self.menu)
+        settings_act.triggered.connect(self.show_settings)
+        self.menu.addAction(settings_act)
 
         scan_act = QAction("TSX Screener...", self.menu)
         scan_act.triggered.connect(self.show_screener)
@@ -750,6 +926,13 @@ class TrayApp(QObject):
         self.timer.start(hours * 60 * 60 * 1000)
 
     def run_daily_check_if_due(self) -> None:
+        mode = str(self.cfg.get("check_on_startup") or "due").strip().lower()
+        if mode == "never":
+            self._schedule_next_check()
+            return
+        if mode == "always":
+            self.run_daily_check()
+            return
         results = self._results()
         hours = max(1, int(self.cfg.get("check_interval_hours") or 24))
         now = datetime.now().astimezone()
@@ -811,8 +994,13 @@ class TrayApp(QObject):
         self._sync_details_status()
         thread.start()
         self._schedule_next_check()
-        # Failsafe: don't leave UI stuck if a worker misbehaves.
-        QTimer.singleShot(max(30, len(symbols) * (int((self.cfg.get("ai") or {}).get("timeout_seconds") or 180) + 30)) * 1000, self._check_watchdog)
+        # Failsafe: don't leave UI stuck if a worker misbehaves (includes agy model retries + Ollama fallback).
+        ai = self.cfg.get("ai") if isinstance(self.cfg.get("ai"), dict) else {}
+        t = int(ai.get("timeout_seconds") or 180)
+        ot = int(ai.get("ollama_timeout_seconds") or 180)
+        models = ai.get("agy_fallback_models") if isinstance(ai.get("agy_fallback_models"), list) else []
+        per_symbol = max(60, t * (1 + len(models)) + ot + 60)
+        QTimer.singleShot(max(30_000, len(symbols) * per_symbol * 1000), self._check_watchdog)
 
     def _sync_details_status(self) -> None:
         dlg = self._details_dialog
@@ -956,6 +1144,36 @@ class TrayApp(QObject):
     def show_config_location(self) -> None:
         path = str(config_path())
         self.tray.showMessage("Tech Watch Tray config", path, QSystemTrayIcon.MessageIcon.Information, 10000)
+
+    def show_settings(self) -> None:
+        dlg = self._settings_dialog
+        if dlg is not None and dlg.isVisible():
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
+            return
+        self.cfg = load_config()
+        dlg = SettingsDialog(self.cfg, None)
+        self._settings_dialog = dlg
+
+        def _finished(code: int) -> None:
+            self._settings_dialog = None
+            if code == QDialog.DialogCode.Accepted:
+                self.cfg = dlg.result_config()
+                self._save()
+                self._apply_timer()
+                self._rebuild_menu()
+                self.tray.showMessage(
+                    "Tech Watch Tray",
+                    "Settings saved. Restart is not required; new checks will use them.",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    7000,
+                )
+
+        dlg.finished.connect(_finished)
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def show_screener(self) -> None:
         dlg = self._screener_dialog
