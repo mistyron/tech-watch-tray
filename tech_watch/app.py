@@ -5,7 +5,7 @@ import threading
 from datetime import datetime
 from typing import Any
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QListWidget,
@@ -23,6 +24,8 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QSystemTrayIcon,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -135,9 +138,26 @@ class DetailsDialog(QDialog):
         super().__init__(parent)
         self.cfg = cfg
         self.setWindowTitle("Tech Watch - Details")
-        self.resize(860, 620)
+        self.resize(940, 660)
         layout = QVBoxLayout(self)
 
+        self.tabs = QTabWidget()
+        self.overview_table = QTableWidget(0, 4)
+        self.overview_table.setHorizontalHeaderLabels(["Symbol", "Verdict", "Checked", "Summary"])
+        self.overview_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.overview_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.overview_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.overview_table.verticalHeader().setVisible(False)
+        header = self.overview_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.overview_table.cellDoubleClicked.connect(self._open_symbol_from_overview)
+        self.tabs.addTab(self.overview_table, "Overview")
+
+        symbol_page = QWidget()
+        symbol_layout = QVBoxLayout(symbol_page)
         nav = QHBoxLayout()
         nav.addWidget(QLabel("Security:"))
         self.symbol_box = QComboBox()
@@ -145,15 +165,16 @@ class DetailsDialog(QDialog):
         for s in self.symbols:
             self.symbol_box.addItem(s)
         nav.addWidget(self.symbol_box, 1)
-        layout.addLayout(nav)
-
-        self.tabs = QTabWidget()
+        symbol_layout.addLayout(nav)
+        self.detail_tabs = QTabWidget()
         self.summary_box = QPlainTextEdit()
         self.summary_box.setReadOnly(True)
         self.response_box = QPlainTextEdit()
         self.response_box.setReadOnly(True)
-        self.tabs.addTab(self.summary_box, "Summary")
-        self.tabs.addTab(self.response_box, "AI response")
+        self.detail_tabs.addTab(self.summary_box, "Summary")
+        self.detail_tabs.addTab(self.response_box, "AI response")
+        symbol_layout.addWidget(self.detail_tabs)
+        self.tabs.addTab(symbol_page, "Security details")
         layout.addWidget(self.tabs)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
@@ -162,12 +183,34 @@ class DetailsDialog(QDialog):
         layout.addWidget(buttons)
 
         self.symbol_box.currentTextChanged.connect(self._load_symbol)
+        self._refresh_overview()
         if current_symbol and current_symbol in self.symbols:
             self.symbol_box.setCurrentText(current_symbol)
+            self.tabs.setCurrentIndex(1)
         elif self.symbols:
+            self._load_symbol(self.symbols[0])
+
+    def update_data(self, cfg: dict[str, Any], symbol: str | None = None) -> None:
+        self.cfg = cfg
+        current = symbol or self.symbol_box.currentText()
+        self.symbols = [str(s).strip().upper() for s in cfg.get("symbols", []) if str(s).strip()]
+        self.symbol_box.blockSignals(True)
+        self.symbol_box.clear()
+        for s in self.symbols:
+            self.symbol_box.addItem(s)
+        self.symbol_box.blockSignals(False)
+        self._refresh_overview()
+        if current in self.symbols:
+            self.symbol_box.setCurrentText(current)
+            self._load_symbol(current)
+        elif self.symbols:
+            self.symbol_box.setCurrentIndex(0)
             self._load_symbol(self.symbols[0])
         else:
             self.summary_box.setPlainText("No securities configured.")
+            self.response_box.setPlainText("")
+        if symbol:
+            self.tabs.setCurrentIndex(1)
 
     def _fmt_time(self, ts: str | None) -> str:
         if not ts:
@@ -177,6 +220,38 @@ class DetailsDialog(QDialog):
             return dt.strftime("%Y-%m-%d %H:%M")
         except Exception:
             return ts
+
+    def _refresh_overview(self) -> None:
+        results = self.cfg.get("last_results") if isinstance(self.cfg.get("last_results"), dict) else {}
+        self.overview_table.setRowCount(0)
+        for symbol in self.symbols:
+            data = results.get(symbol) or {}
+            verdict = str(data.get("verdict") or "—")
+            checked = self._fmt_time(data.get("checked_at"))
+            summary = str(data.get("summary") or "")
+            row = self.overview_table.rowCount()
+            self.overview_table.insertRow(row)
+            values = [symbol, verdict, checked, summary]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if col == 1 and verdict.upper() == "BUY":
+                    item.setForeground(Qt.GlobalColor.darkGreen)
+                elif col == 1 and verdict.upper() in {"ERROR", "SELL"}:
+                    item.setForeground(Qt.GlobalColor.darkRed)
+                elif col == 1 and verdict.upper() == "WAIT":
+                    item.setForeground(Qt.GlobalColor.darkYellow)
+                if col == 3:
+                    item.setToolTip(summary)
+                self.overview_table.setItem(row, col, item)
+
+    def _open_symbol_from_overview(self, row: int, _col: int) -> None:
+        item = self.overview_table.item(row, 0)
+        if not item:
+            return
+        symbol = item.text().strip().upper()
+        if symbol:
+            self.symbol_box.setCurrentText(symbol)
+            self.tabs.setCurrentIndex(1)
 
     def _load_symbol(self, symbol: str) -> None:
         symbol = (symbol or "").strip().upper()
@@ -211,6 +286,7 @@ class TrayApp(QObject):
         self.check_in_progress = False
         self._last_notified: dict[str, str] = {}
         self._active_thread: AnalysisWorker | None = None
+        self._details_dialog: DetailsDialog | None = None
 
         self.tray = QSystemTrayIcon(self._icon_for_state("idle"))
         self.tray.setToolTip("Tech Watch: idle")
@@ -329,6 +405,10 @@ class TrayApp(QObject):
 
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
+            dlg = self._details_dialog
+            if dlg is not None and dlg.isVisible():
+                dlg.hide()
+                return
             self.show_details(None)
 
     def run_daily_check_if_due(self) -> None:
@@ -379,6 +459,8 @@ class TrayApp(QObject):
         thread = AnalysisWorker(symbols, self.cfg, signals)
         self._active_thread = thread
         thread.start()
+        # Failsafe: don't leave UI stuck if a worker misbehaves.
+        QTimer.singleShot(max(30, len(symbols) * (int((self.cfg.get("ai") or {}).get("timeout_seconds") or 180) + 30)) * 1000, self._check_watchdog)
 
     def _on_result(self, result_obj: object) -> None:
         if not isinstance(result_obj, AnalysisResult):
@@ -420,6 +502,17 @@ class TrayApp(QObject):
         self.check_in_progress = False
         self._active_thread = None
         self._rebuild_menu()
+
+    def _check_watchdog(self) -> None:
+        if not self.check_in_progress:
+            return
+        t = self._active_thread
+        if t is not None and t.is_alive():
+            return
+        self.check_in_progress = False
+        self._active_thread = None
+        self._rebuild_menu()
+        self.tray.showMessage("Tech Watch", "Check state was reset after a stalled check.", QSystemTrayIcon.MessageIcon.Warning, 8000)
 
     def manage_symbols(self) -> None:
         dlg = ManageSymbolsDialog(self.cfg, None)
@@ -466,10 +559,24 @@ class TrayApp(QObject):
             10000,
         )
 
+    def _details_closed(self) -> None:
+        self._details_dialog = None
+
     def show_details(self, symbol: str | None = None) -> None:
         self.cfg = load_config()  # reflect latest saved results/command changes
+        dlg = self._details_dialog
+        if dlg is not None and dlg.isVisible():
+            dlg.update_data(self.cfg, symbol)
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
+            return
         dlg = DetailsDialog(self.cfg, symbol, None)
-        dlg.exec()
+        self._details_dialog = dlg
+        dlg.finished.connect(self._details_closed)
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def show_config_location(self) -> None:
         path = str(config_path())
