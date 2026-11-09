@@ -40,16 +40,33 @@ def _resolve_command(cmd: str) -> str | None:
     p = shutil.which(cmd)
     if p:
         return p
+    home = str(subprocess.os.path.expanduser("~"))
     fallbacks = {
-        "gemini": "/home/ron_plasma/.npm-global/bin/gemini",
-        "agy": shutil.which("agy") or "/usr/local/bin/agy",
-        "antigravity": shutil.which("antigravity") or "/usr/local/bin/antigravity",
+        "gemini": [
+            subprocess.os.path.join(home, ".npm-global", "bin", "gemini"),
+            "/home/ron_plasma/.npm-global/bin/gemini",
+        ],
+        "agy": [
+            subprocess.os.path.join(home, ".local", "bin", "agy"),
+            subprocess.os.path.join(home, ".npm-global", "bin", "agy"),
+            "/usr/local/bin/agy",
+        ],
+        "antigravity": [
+            subprocess.os.path.join(home, ".local", "bin", "antigravity"),
+            subprocess.os.path.join(home, ".npm-global", "bin", "antigravity"),
+            "/usr/local/bin/antigravity",
+        ],
+        "ollama": [
+            "/usr/local/sbin/ollama",
+            "/usr/local/bin/ollama",
+            "/usr/bin/ollama",
+        ],
     }
-    fb = fallbacks.get(cmd)
-    if fb and shutil.which(fb):
-        return fb
-    if fb and subprocess.os.path.exists(fb):
-        return fb
+    for fb in fallbacks.get(cmd, []):
+        if fb and shutil.which(fb):
+            return shutil.which(fb)
+        if fb and subprocess.os.path.exists(fb) and subprocess.os.access(fb, subprocess.os.X_OK):
+            return fb
     return None
 
 
@@ -100,7 +117,7 @@ def parse_analysis(symbol: str, text: str) -> tuple[str, str]:
             verdict = "BUY"
         elif re.search(r"\b(wait and see|wait|hold off|not yet|neutral)\b", low):
             verdict = "WAIT"
-        elif re.search(r"\bsell\b", low):
+        elif re.search(r"\b(sell|selling|sold)\b", low):
             verdict = "SELL"
         elif re.search(r"\bhold\b", low):
             verdict = "HOLD"
@@ -309,6 +326,19 @@ def _is_fallback_error(text: str) -> bool:
     return any(m in low for m in markers)
 
 
+def _is_missing_command_error(text: str) -> bool:
+    low = (text or "").lower()
+    markers = (
+        "ai command not found",
+        "could not find `",
+        "command not found",
+        "no such file or directory",
+        "not found on path",
+        "filenotfounderror",
+    )
+    return any(m in low for m in markers)
+
+
 def _ollama_fallback(
     symbol: str,
     prompt: str,
@@ -321,7 +351,7 @@ def _ollama_fallback(
     if not ai.get("fallback_on_quota", True):
         return None
     errs = [prior_errors] if isinstance(prior_errors, str) else list(prior_errors or [])
-    if not errs or not any(_is_fallback_error(e) for e in errs):
+    if not errs or not any(_is_fallback_error(e) or _is_missing_command_error(e) for e in errs):
         return None
     model = str(ai.get("ollama_model") or "llama3.2:1b").strip() or "llama3.2:1b"
     cmd = str(ai.get("ollama_command") or "ollama").strip() or "ollama"
