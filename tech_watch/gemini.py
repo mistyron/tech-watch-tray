@@ -1,3 +1,4 @@
+import logging
 import math
 import re
 import shlex
@@ -6,6 +7,8 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -44,7 +47,6 @@ def _resolve_command(cmd: str) -> str | None:
     fallbacks = {
         "gemini": [
             subprocess.os.path.join(home, ".npm-global", "bin", "gemini"),
-            "/home/ron_plasma/.npm-global/bin/gemini",
         ],
         "agy": [
             subprocess.os.path.join(home, ".local", "bin", "agy"),
@@ -138,12 +140,7 @@ def _command_argv(symbol: str, prompt: str, cfg: dict[str, Any]) -> list[str] | 
     ai = cfg.get("ai") if isinstance(cfg.get("ai"), dict) else {}
     cmd = ai.get("command")
     if not isinstance(cmd, list) or not cmd:
-        # legacy
-        legacy_cmd = str(cfg.get("gemini_command") or "gemini")
-        legacy_args = cfg.get("gemini_args")
-        if not isinstance(legacy_args, list):
-            legacy_args = ["-p"]
-        cmd = [legacy_cmd, *legacy_args, "{prompt}"]
+        return None
     argv: list[str] = []
     for part in cmd:
         s = str(part)
@@ -190,6 +187,42 @@ def _with_agy_model(argv: list[str], model: str) -> list[str]:
     return a + ["--model", model]
 
 
+_YF_EXCHANGE_SUFFIXES = (
+    ".TO",
+    ".V",
+    ".CN",
+    ".NE",
+    ".L",
+    ".DE",
+    ".F",
+    ".SW",
+    ".PA",
+    ".AS",
+    ".BR",
+    ".MI",
+    ".MC",
+    ".ST",
+    ".HE",
+    ".CO",
+    ".OL",
+    ".IR",
+    ".AX",
+    ".NZ",
+    ".HK",
+    ".T",
+    ".SI",
+    ".KS",
+    ".KQ",
+    ".TW",
+    ".TWO",
+    ".SA",
+    ".MX",
+    ".BA",
+    ".JO",
+    ".PK",
+)
+
+
 def _yf_symbol(symbol: str) -> str:
     s = (symbol or "").strip().upper()
     if not s:
@@ -199,6 +232,25 @@ def _yf_symbol(symbol: str) -> str:
         return _to_yahoo_symbol(s)
     except Exception:
         return s if "." in s else f"{s}.TO"
+
+
+def _yf_symbol_candidates(symbol: str) -> list[str]:
+    s = (symbol or "").strip().upper().replace("$", "")
+    if not s:
+        return []
+    if s.startswith("^") or "=" in s:
+        return [s]
+    if any(s.endswith(suffix) for suffix in _YF_EXCHANGE_SUFFIXES):
+        if s.endswith(".TO"):
+            base = s[:-3]
+            if "." in base:
+                return [f"{base.replace('.', '-')}.TO"]
+        return [s]
+    if "." in s:
+        base, _, cls = s.rpartition(".")
+        hyphen = f"{base}-{cls}"
+        return [hyphen, f"{hyphen}.TO", s]
+    return [s, f"{s}.TO"]
 
 
 def _fmt_num(v: Any, digits: int = 4) -> str:
@@ -215,20 +267,35 @@ def _fmt_num(v: Any, digits: int = 4) -> str:
 
 def fetch_live_snapshot(symbol: str) -> tuple[str, str]:
     try:
-        import numpy as np  # noqa: F401
         import pandas as pd
         import yfinance as yf
-        from .screener import _sma, _ema, _rsi, _macd  # type: ignore
+        from .screener import _sma, _rsi, _macd  # type: ignore
     except Exception as e:
         return "", f"Live data unavailable (missing dependency): {e}"
 
-    ysym = _yf_symbol(symbol)
-    try:
-        data = yf.download(ysym, period="10mo", interval="1d", progress=False, auto_adjust=False, threads=False)
-    except Exception as e:
-        return "", f"Live data fetch failed for {ysym}: {e}"
-    if data is None or getattr(data, "empty", True):
-        return "", f"No live market data returned for {ysym}."
+    candidates = _yf_symbol_candidates(symbol)
+    if not candidates:
+        return "", "No symbol provided for live data."
+    data = None
+    ysym = candidates[0]
+    errors: list[str] = []
+    for candidate in candidates:
+        try:
+            candidate_data = yf.download(
+                candidate, period="10mo", interval="1d", progress=False, auto_adjust=True, threads=False
+            )
+        except Exception as e:
+            errors.append(f"{candidate}: {e}")
+            continue
+        if candidate_data is None or getattr(candidate_data, "empty", True):
+            errors.append(f"{candidate}: no data")
+            continue
+        data = candidate_data
+        ysym = candidate
+        break
+    if data is None:
+        detail = f" Last error: {errors[-1]}" if errors else ""
+        return "", f"No live market data returned for {symbol} (tried {', '.join(candidates)}).{detail}"
 
     df = data
     if isinstance(getattr(df, "columns", None), pd.MultiIndex):
@@ -260,7 +327,7 @@ def fetch_live_snapshot(symbol: str) -> tuple[str, str]:
 
     s20 = _sma(close, 20).iloc[-1]
     s50 = _sma(close, 50).iloc[-1]
-    s200 = _sma(close, 200).iloc[-1] if len(close) >= 120 else float("nan")
+    s200 = _sma(close, 200).iloc[-1] if len(close) >= 200 else float("nan")
     rsi14 = _rsi(close, 14).iloc[-1]
     _ml, _ms, mh = _macd(close)
     mhv = mh.iloc[-1]
@@ -592,5 +659,6 @@ def query_gemini(symbol: str, cfg: dict[str, Any], timeout: int | None = None, p
     last = attempts[-1][1] if attempts else "AI command failed"
     friendly = _friendly_error(last)
     detail = "Tried:\n" + "\n".join(f"- {a}: {_friendly_error(e)[:180]}" for a, e in attempts)
+    log.warning("AI check failed for %s: %s", symbol, friendly)
     return AnalysisResult(symbol, "ERROR", friendly[:240], detail, False, friendly, checked_at)
 

@@ -1,5 +1,4 @@
-import html
-import math
+import logging
 import shlex
 import signal
 import sys
@@ -20,11 +19,8 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
-    QInputDialog,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMenu,
     QMessageBox,
     QPlainTextEdit,
@@ -42,7 +38,10 @@ from PyQt6.QtWidgets import (
 
 from .config import config_path, load_config, save_config
 from .gemini import AnalysisResult, query_gemini
+from .logging_setup import setup_logging
 from .screener import get_universe, screen_symbols
+
+log = logging.getLogger(__name__)
 
 
 def _fmt_time(ts: str | None) -> str:
@@ -150,6 +149,10 @@ class AnalysisWorker(threading.Thread):
         self.symbols = list(symbols)
         self.cfg = dict(cfg)
         self.signals = signals
+        self._cancel = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel.set()
 
     def run(self) -> None:
         def progress(detail: str, sym: str = "") -> None:
@@ -157,6 +160,8 @@ class AnalysisWorker(threading.Thread):
 
         try:
             for i, symbol in enumerate(self.symbols):
+                if self._cancel.is_set():
+                    break
                 self.signals.progress.emit(symbol, "preparing check")
                 result = query_gemini(symbol, self.cfg, progress=progress)
                 self.signals.progress.emit(symbol, "formatting reply")
@@ -179,10 +184,12 @@ class ScreenerWorker(threading.Thread):
         try:
             universe = get_universe(self.mode, limit=self.limit)
             min_score = self.min_score
+            errors: list[str] = []
             hits = screen_symbols(
                 universe,
                 min_score=1,
                 progress_cb=lambda d, t, s: self.signals.progress.emit(d, t, s),
+                errors=errors,
             )
             filtered = [h for h in hits if h.score >= min_score]
             self.signals.done.emit({
@@ -191,77 +198,11 @@ class ScreenerWorker(threading.Thread):
                 "scanned": len(universe),
                 "mode": self.mode,
                 "min_score": min_score,
+                "errors": errors[:20],
             })
         except Exception as e:
+            log.exception("TSX screener failed")
             self.signals.error.emit(str(e))
-
-
-class ManageSymbolsDialog(QDialog):
-    def __init__(self, cfg: dict[str, Any], parent: QWidget | None = None):
-        super().__init__(parent)
-        self.setWindowIcon(_tray_icon("idle"))
-        self.setWindowTitle("Tech Watch Tray - Securities")
-        self.cfg = cfg
-        self.resize(420, 360)
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Symbols monitored daily (e.g., CGL.TO, HURA.TO):"))
-        self.list_widget = QListWidget()
-        for s in cfg.get("symbols", []):
-            self.list_widget.addItem(QListWidgetItem(str(s)))
-        layout.addWidget(self.list_widget)
-
-        row = QHBoxLayout()
-        add_btn = QPushButton("Add")
-        remove_btn = QPushButton("Remove")
-        row.addWidget(add_btn)
-        row.addWidget(remove_btn)
-        row.addStretch(1)
-        layout.addLayout(row)
-
-        interval_row = QHBoxLayout()
-        interval_row.addWidget(QLabel("Check interval (hours):"))
-        self.interval = QSpinBox()
-        self.interval.setRange(1, 168)
-        self.interval.setValue(int(cfg.get("check_interval_hours") or 24))
-        interval_row.addWidget(self.interval)
-        interval_row.addStretch(1)
-        layout.addLayout(interval_row)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
-        layout.addWidget(buttons)
-
-        add_btn.clicked.connect(self.add_symbol)
-        remove_btn.clicked.connect(self.remove_selected)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-
-    def add_symbol(self) -> None:
-        text, ok = QInputDialog.getText(self, "Add Security", "Symbol/ticker (e.g., AAPL, CGL.TO):")
-        if not ok:
-            return
-        symbol = text.strip().upper()
-        if not symbol:
-            return
-        existing = {self.list_widget.item(i).text().upper() for i in range(self.list_widget.count())}
-        if symbol in existing:
-            return
-        self.list_widget.addItem(QListWidgetItem(symbol))
-
-    def remove_selected(self) -> None:
-        for item in self.list_widget.selectedItems():
-            row = self.list_widget.row(item)
-            self.list_widget.takeItem(row)
-
-    def apply(self) -> dict[str, Any]:
-        symbols = []
-        for i in range(self.list_widget.count()):
-            s = self.list_widget.item(i).text().strip().upper()
-            if s and s not in symbols:
-                symbols.append(s)
-        self.cfg["symbols"] = symbols
-        self.cfg["check_interval_hours"] = int(self.interval.value())
-        return self.cfg
 
 
 class DetailsDialog(QDialog):
@@ -698,11 +639,18 @@ class ScreenerDialog(QDialog):
         top = payload.get("top") or []
         scanned = payload.get("scanned") or 0
         min_score = payload.get("min_score") or self.min_score.value()
+        errors = payload.get("errors") or []
         show = self._hits if self._hits else top
         if self._hits:
-            self.status.setText(f"Scanned {scanned} symbols. Found {len(self._hits)} match(es) with score >= {min_score}.")
+            text = f"Scanned {scanned} symbols. Found {len(self._hits)} match(es) with score >= {min_score}."
         else:
-            self.status.setText(f"Scanned {scanned} symbols. No symbols met score >= {min_score}; showing top {len(show)} by technical score (market may have few strong setups now).")
+            text = f"Scanned {scanned} symbols. No symbols met score >= {min_score}; showing top {len(show)} by technical score (market may have few strong setups now)."
+        if errors:
+            text += f" {len(errors)} data error(s); hover for details."
+            self.status.setToolTip("\n".join(str(e) for e in errors))
+        else:
+            self.status.setToolTip("")
+        self.status.setText(text)
         for hit in show:
             row = self.table.rowCount()
             self.table.insertRow(row)
@@ -846,6 +794,11 @@ class TrayApp(QObject):
         header.setEnabled(not self.check_in_progress)
         self.menu.addAction(header)
 
+        if self.check_in_progress:
+            cancel_act = QAction("Cancel check", self.menu)
+            cancel_act.triggered.connect(self.cancel_check)
+            self.menu.addAction(cancel_act)
+
         settings_act = QAction("Settings...", self.menu)
         settings_act.triggered.connect(self.show_settings)
         self.menu.addAction(settings_act)
@@ -969,7 +922,7 @@ class TrayApp(QObject):
         if not symbols:
             self.tray.showMessage(
                 "Tech Watch Tray",
-                "No securities configured. Use 'Manage securities...' to add symbols.",
+                "No securities configured. Use 'Settings...' to add symbols.",
                 QSystemTrayIcon.MessageIcon.Information,
                 8000,
             )
@@ -977,6 +930,7 @@ class TrayApp(QObject):
         self.check_in_progress = True
         self._check_status = {symbol: "pending" for symbol in symbols}
         self._update_tray_state()
+        self._rebuild_menu()
         self._start_busy_indicator()
         self.tray.showMessage(
             "Tech Watch Tray",
@@ -1075,50 +1029,16 @@ class TrayApp(QObject):
         self._refresh_details_data()
         self.tray.showMessage("Tech Watch Tray", "Check state was reset after a stalled check.", QSystemTrayIcon.MessageIcon.Warning, 8000)
 
-    def manage_symbols(self) -> None:
-        dlg = ManageSymbolsDialog(self.cfg, None)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            self.cfg = dlg.apply()
-            # prune removed symbols from results? keep history; harmless
-            self._save()
-            self._apply_timer()
-            self._rebuild_menu()
-
-    def set_ai_command(self) -> None:
-        import shlex
-
-        ai = self.cfg.get("ai") if isinstance(self.cfg.get("ai"), dict) else {}
-        current = ai.get("command") or ["gemini", "-p", "{prompt}"]
-        try:
-            current_s = shlex.join([str(x) for x in current])
-        except Exception:
-            current_s = 'gemini -p "{prompt}"'
-        text, ok = QInputDialog.getText(
-            None,
-            "Tech Watch Tray - AI command",
-            "Command argv (use {prompt} placeholder). Example: gemini -p {prompt}\n",
-            text=current_s,
-        )
-        if not ok:
-            return
-        try:
-            parts = shlex.split(text.strip())
-        except Exception as e:
-            QMessageBox.warning(None, "Tech Watch Tray", f"Could not parse command: {e}")
-            return
-        if not parts:
-            return
-        if not any("{prompt}" in p for p in parts):
-            parts.append("{prompt}")
-        self.cfg.setdefault("ai", {})["command"] = parts
-        self._save()
-        self._rebuild_menu()
-        self.tray.showMessage(
-            "Tech Watch Tray",
-            "AI command saved. Use 'Check all now' to test. If checks fail, the notification/details will show the command error.",
-            QSystemTrayIcon.MessageIcon.Information,
-            10000,
-        )
+    def cancel_check(self) -> None:
+        t = self._active_thread
+        if t is not None and hasattr(t, "cancel"):
+            t.cancel()
+            self.tray.showMessage(
+                "Tech Watch Tray",
+                "Cancelling after the current symbol finishes.",
+                QSystemTrayIcon.MessageIcon.Information,
+                5000,
+            )
 
     def _details_closed(self) -> None:
         self._details_dialog = None
@@ -1191,6 +1111,7 @@ class TrayApp(QObject):
 
 
 def main(argv: list[str] | None = None) -> int:
+    setup_logging()
     argv = argv if argv is not None else sys.argv
     app = QApplication(argv)
     app.setQuitOnLastWindowClosed(False)

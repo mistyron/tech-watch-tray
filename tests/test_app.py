@@ -68,7 +68,7 @@ def test_screener_worker_success(monkeypatch, qapp):
     monkeypatch.setattr(
         app_mod,
         "screen_symbols",
-        lambda u, min_score, progress_cb: progress_cb(1, 1, "A.TO") or [Hit()],
+        lambda u, min_score, progress_cb, errors=None: progress_cb(1, 1, "A.TO") or [Hit()],
     )
     w = app_mod.ScreenerWorker("tsx_composite", 55, 10, signals)
     w.run()
@@ -76,6 +76,7 @@ def test_screener_worker_success(monkeypatch, qapp):
     assert out["d"]["scanned"] == 1
     assert out["d"]["mode"] == "tsx_composite"
     assert out["d"]["min_score"] == 55
+    assert out["d"]["errors"] == []
     assert "e" not in out
     assert out.get("p")
 
@@ -94,9 +95,28 @@ def test_screener_worker_error(monkeypatch, qapp):
     assert "bad" in out["e"]
 
 
+def test_analysis_worker_cancel_stops_before_next_symbol(monkeypatch, qapp):
+    calls = []
+    finished = []
+    signals = app_mod.WorkerSignals()
+    signals.finished.connect(lambda: finished.append(True))
+    worker = app_mod.AnalysisWorker(["A", "B"], {}, signals)
+
+    def fake_query(sym, cfg, progress=None):
+        calls.append(sym)
+        worker.cancel()
+        return f"res:{sym}"
+
+    monkeypatch.setattr(app_mod, "query_gemini", fake_query)
+    worker.run()
+    assert calls == ["A"]
+    assert finished == [True]
+
+
 def test_main_no_tray(monkeypatch):
     # `main()` creates its own QApplication; pass a fake class that reuses the
     # existing Qt instance to avoid conflicting app lifecycles in pytest.
+    monkeypatch.setattr(app_mod, "setup_logging", lambda: None)
     existing = QApplication.instance()
 
     class FakeApp:

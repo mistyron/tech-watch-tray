@@ -1,6 +1,8 @@
 import subprocess
+import sys
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 import tech_watch.gemini as gemini
@@ -15,7 +17,10 @@ def test_resolve_command_uses_which(monkeypatch):
 def test_resolve_command_fallback_path(monkeypatch):
     monkeypatch.setattr(gemini.shutil, "which", lambda c: None)
     monkeypatch.setattr(gemini.subprocess.os.path, "exists", lambda p: True)
-    assert gemini._resolve_command("gemini") == "/home/ron_plasma/.npm-global/bin/gemini"
+    expected = gemini.subprocess.os.path.join(
+        gemini.subprocess.os.path.expanduser("~"), ".npm-global", "bin", "gemini"
+    )
+    assert gemini._resolve_command("gemini") == expected
 
 
 def test_reconcile_verdict_buy_wait_cues():
@@ -56,11 +61,10 @@ def test_command_argv_substitutes_and_resolves(monkeypatch):
     assert argv == ["/x/myai", "--sym", "AAPL", "hello"]
 
 
-def test_command_argv_legacy_and_missing_command(monkeypatch):
+def test_command_argv_missing_command(monkeypatch):
     monkeypatch.setattr(gemini, "_resolve_command", lambda c: f"/x/{c}")
-    argv = gemini._command_argv("A", "p", {"gemini_command": "g", "gemini_args": ["-p"]})
-    assert argv == ["/x/g", "-p", "p"]
-    assert gemini._command_argv("A", "p", {"ai": {"command": []}}) is not None  # falls to legacy
+    assert gemini._command_argv("A", "p", {"gemini_command": "g", "gemini_args": ["-p"]}) is None
+    assert gemini._command_argv("A", "p", {"ai": {"command": []}}) is None
 
 
 def test_is_agy_command_and_model_helpers():
@@ -85,6 +89,37 @@ def test_yf_symbol():
     assert gemini._yf_symbol("xic") == "XIC.TO"
     assert gemini._yf_symbol("BRK-B") == "BRK-B.TO"
     assert gemini._yf_symbol("") == ""
+
+
+def test_yf_symbol_candidates_tries_us_and_tsx():
+    assert gemini._yf_symbol_candidates("AAPL") == ["AAPL", "AAPL.TO"]
+    assert gemini._yf_symbol_candidates("XIC") == ["XIC", "XIC.TO"]
+    assert gemini._yf_symbol_candidates("XIC.TO") == ["XIC.TO"]
+    assert gemini._yf_symbol_candidates("BBD.B") == ["BBD-B", "BBD-B.TO", "BBD.B"]
+    assert gemini._yf_symbol_candidates("BBD.B.TO") == ["BBD-B.TO"]
+    assert gemini._yf_symbol_candidates("BRK-B") == ["BRK-B", "BRK-B.TO"]
+    assert gemini._yf_symbol_candidates("^GSPC") == ["^GSPC"]
+    assert gemini._yf_symbol_candidates("") == []
+
+
+def test_fetch_live_snapshot_uses_adjusted_prices_and_candidates(monkeypatch):
+    calls = []
+    idx = pd.date_range("2024-01-01", periods=60, freq="B")
+    df = pd.DataFrame({"Close": range(1, 61), "Volume": [1_000_000] * 60}, index=idx)
+
+    def download(symbol, **kwargs):
+        calls.append((symbol, kwargs))
+        if symbol == "AAPL":
+            return pd.DataFrame()
+        return df
+
+    monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(download=download))
+    text, err = gemini.fetch_live_snapshot("AAPL")
+    assert err == ""
+    assert calls[0][0] == "AAPL"
+    assert calls[1][0] == "AAPL.TO"
+    assert all(kwargs["auto_adjust"] is True for _, kwargs in calls)
+    assert "AAPL.TO" in text
 
 
 def test_fmt_num():

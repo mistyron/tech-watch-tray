@@ -1,7 +1,6 @@
 import io
-import math
+import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable
@@ -14,6 +13,8 @@ try:
     import yfinance as yf
 except Exception:  # pragma: no cover
     yf = None
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -56,8 +57,11 @@ def _to_yahoo_symbol(symbol: str) -> str:
     s = (symbol or "").strip().upper().replace("$", "")
     if not s:
         return s
+    if s.endswith(".TO"):
+        base = s[:-3]
+        return f"{base.replace('.', '-')}.TO"
     if "." in s:
-        return s
+        return f"{s.replace('.', '-')}.TO"
     # bare Canadian tickers in some lists need exchange suffix; default to TSX
     return f"{s}.TO"
 
@@ -128,11 +132,11 @@ def get_universe(mode: str = "tsx_composite", limit: int = 0) -> list[dict[str, 
 
 
 def _sma(s: pd.Series, n: int) -> pd.Series:
-    return s.rolling(n, min_periods=max(2, n // 2)).mean()
+    return s.rolling(n, min_periods=n).mean()
 
 
 def _ema(s: pd.Series, n: int) -> pd.Series:
-    return s.ewm(span=n, adjust=False, min_periods=max(2, n // 2)).mean()
+    return s.ewm(span=n, adjust=False, min_periods=n).mean()
 
 
 def _rsi(close: pd.Series, n: int = 14) -> pd.Series:
@@ -245,7 +249,11 @@ def analyze_history(symbol: str, name: str, df: pd.DataFrame) -> ScreenHit | Non
             div = d["Dividends"].astype(float)
             paid = div[div > 0]
             if not paid.empty and price:
-                ttm = float(paid.tail(4).sum())
+                if isinstance(paid.index, pd.DatetimeIndex):
+                    cutoff = paid.index.max() - pd.Timedelta(days=365)
+                    ttm = float(paid[paid.index >= cutoff].sum())
+                else:
+                    ttm = float(paid.tail(4).sum())
                 if ttm > 0:
                     dividend_yield_pct = round((ttm / price) * 100, 2)
     except Exception:
@@ -330,6 +338,7 @@ def screen_symbols(
     batch_size: int = 40,
     period: str = "10mo",
     progress_cb=None,
+    errors: list[str] | None = None,
 ) -> list[ScreenHit]:
     if yf is None:
         raise RuntimeError("yfinance is required for TSX screening")
@@ -339,8 +348,18 @@ def screen_symbols(
     for batch in _chunks(symbols, max(1, batch_size)):
         tickers = " ".join(s["symbol"] for s in batch)
         try:
-            data = yf.download(tickers, period=period, interval="1d", group_by="ticker", auto_adjust=False, progress=False, threads=True, actions=True)
-        except Exception:
+            data = yf.download(tickers, period=period, interval="1d", group_by="ticker", auto_adjust=True, progress=False, threads=True, actions=True)
+        except Exception as e:
+            msg = f"Batch download failed for {tickers}: {e}"
+            log.warning(msg)
+            if errors is not None:
+                errors.append(msg)
+            data = None
+        if data is None or getattr(data, "empty", True):
+            msg = f"No data returned for batch {tickers}"
+            log.warning(msg)
+            if errors is not None:
+                errors.append(msg)
             data = pd.DataFrame()
         for meta in batch:
             sym = meta["symbol"]
@@ -356,8 +375,11 @@ def screen_symbols(
                 hit = analyze_history(sym, name, df)
                 if hit and hit.score >= min_score:
                     out.append(hit)
-            except Exception:
-                pass
+            except Exception as e:
+                msg = f"Analysis failed for {sym}: {e}"
+                log.warning(msg)
+                if errors is not None:
+                    errors.append(msg)
             done += 1
             if progress_cb and (done % 10 == 0 or done == total):
                 try:

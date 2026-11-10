@@ -17,6 +17,8 @@ def test_to_yahoo_symbol():
     assert screener._to_yahoo_symbol("XIC.TO") == "XIC.TO"
     assert screener._to_yahoo_symbol(" brk-b ") == "BRK-B.TO"
     assert screener._to_yahoo_symbol("$AAPL") == "AAPL.TO"
+    assert screener._to_yahoo_symbol("BBD.B") == "BBD-B.TO"
+    assert screener._to_yahoo_symbol("BBD.B.TO") == "BBD-B.TO"
     assert screener._to_yahoo_symbol("") == ""
 
 
@@ -31,6 +33,10 @@ def test_indicators_shapes():
     s = pd.Series(100 + np.cumsum(rng.normal(0.1, 1.0, 120)), dtype=float)
     assert len(screener._sma(s, 20)) == 120
     assert len(screener._ema(s, 20)) == 120
+    assert screener._sma(s, 20).iloc[:19].isna().all()
+    assert not pd.isna(screener._sma(s, 20).iloc[19])
+    assert screener._ema(s, 20).iloc[:19].isna().all()
+    assert not pd.isna(screener._ema(s, 20).iloc[19])
     rsi = screener._rsi(s, 14)
     assert len(rsi) == 120
     valid = rsi.dropna()
@@ -89,6 +95,31 @@ def test_analyze_history_dividend_yield():
     assert hit.metrics["dividend_yield_pct"] is None or hit.metrics["dividend_yield_pct"] >= 0
 
 
+def test_analyze_history_dividend_yield_uses_trailing_year():
+    df = _make_df(n=520, start=10.0, drift=0.0)
+    df["Dividends"] = 0.0
+    for pos in (-1, -80, -160, -300):
+        df.iloc[pos, df.columns.get_loc("Dividends")] = 0.25
+    hit = screener.analyze_history("DIV.TO", "Div", df)
+    assert hit is not None
+    price = hit.price
+    expected = round((0.75 / price) * 100, 2)
+    assert hit.metrics["dividend_yield_pct"] == expected
+
+
+def test_analyze_history_minimum_bars_does_not_crash():
+    n = 60
+    idx = pd.date_range("2024-01-01", periods=n, freq="B")
+    df = pd.DataFrame(
+        {"Close": np.linspace(10, 12, n), "Volume": 1_000_000},
+        index=idx,
+    )
+    hit = screener.analyze_history("X.TO", "X", df)
+    assert hit is not None
+    assert hit.metrics["sma200"] is None
+    assert 0 <= hit.score <= 100
+
+
 def test_screen_symbols_requires_yfinance(monkeypatch):
     monkeypatch.setattr(screener, "yf", None)
     with pytest.raises(RuntimeError, match="yfinance"):
@@ -101,21 +132,40 @@ def test_screen_symbols_with_mocked_yfinance(monkeypatch):
     monkeypatch.setattr(screener, "yf", fake_yf)
     monkeypatch.setattr(screener.time, "sleep", lambda *_: None)
     calls = []
+    errors = []
     hits = screener.screen_symbols(
         [{"symbol": "X.TO", "name": "X"}, {"symbol": "Y.TO", "name": "Y"}],
         min_score=0,
         batch_size=10,
         progress_cb=lambda d, t, s: calls.append((d, t, s)),
+        errors=errors,
     )
     assert isinstance(hits, list)
     assert calls
+    assert errors == []
+    assert fake_yf.calls[0]["auto_adjust"] is True
+
+
+def test_screen_symbols_surfaces_download_failure(monkeypatch):
+    class BadYF:
+        def download(self, *a, **k):
+            raise RuntimeError("network down")
+
+    monkeypatch.setattr(screener, "yf", BadYF())
+    monkeypatch.setattr(screener.time, "sleep", lambda *_: None)
+    errors = []
+    hits = screener.screen_symbols([{"symbol": "X.TO", "name": "X"}], errors=errors)
+    assert hits == []
+    assert any("network down" in e for e in errors)
 
 
 class SimpleNamespaceYF:
     def __init__(self, df):
         self._df = df
+        self.calls = []
 
     def download(self, tickers, period, interval, group_by, auto_adjust, progress, threads, actions=False):
+        self.calls.append({"tickers": tickers, "auto_adjust": auto_adjust})
         # return MultiIndex like yfinance group_by='ticker' for multiple tickers
         syms = str(tickers).split()
         if len(syms) <= 1:

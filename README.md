@@ -22,7 +22,7 @@ A small Linux tray application for KDE/Plasma that monitors stock/security techn
   gemini -p "<prompt>"
   ```
 
-  If your `gemini` CLI no longer works for your account (see troubleshooting), change `ai.command` in the config or use the tray menu: **Set AI command...** The command must accept the prompt; use `{prompt}` as a placeholder. Example: `agy -p {prompt}` (if you have an Antigravity CLI installed), or any script/wrapper that prints the model response to stdout.
+  If your `gemini` CLI no longer works for your account (see troubleshooting), change `ai.command` in the config or use the tray menu: **Settings...** The command must accept the prompt; use `{prompt}` as a placeholder. Example: `agy -p {prompt}` (if you have an Antigravity CLI installed), or any script/wrapper that prints the model response to stdout.
 
 ## Run
 
@@ -42,7 +42,7 @@ Config is stored at:
 
 - `$XDG_CONFIG_HOME/tech-watch/config.json` (usually `~/.config/tech-watch/config.json`)
 
-Tray menu actions: **Manage securities...** (add/remove symbols, interval), **Set AI command...**.
+Tray menu actions: **Check all now**, **Cancel check** (while a check is running), **Settings...** (symbols, interval, AI command, prompt), **TSX Screener...**, and **Open config file location**.
 
 Important config fields:
 
@@ -52,7 +52,6 @@ Important config fields:
   ```json
   "ai": { "command": ["gemini", "-p", "{prompt}"], "timeout_seconds": 180 }
   ```
-- `gemini_command` / `gemini_args`: legacy fallback (used only if `ai.command` is missing/invalid).
 - `query_template`: prompt sent to the AI. Must include `{symbol}`. The default asks for:
   - `VERDICT: BUY|WAIT|HOLD|SELL`
   - `SUMMARY: <one short sentence>`
@@ -60,6 +59,8 @@ Important config fields:
 - `last_results`: cached latest result per symbol (written automatically).
 
 ## Troubleshooting
+
+Logs are written to `$XDG_DATA_HOME/tech-watch/tech-watch.log` (usually `~/.local/share/tech-watch/tech-watch.log`) and rotate at 1 MB with three backups.
 
 ### `IneligibleTierError` / "Gemini Code Assist for individuals ... migrate to Antigravity"
 
@@ -93,7 +94,8 @@ Adjust `Exec` if you move the project.
 
 ## Notes / limitations
 
-- This app does **not** fetch market data directly; it relies on the configured AI command/provider to analyze/report technicals for the symbol you provide. Results depend on the provider's available data/tools and may be incomplete or stale.
+- Normal checks rely on the configured AI command/provider to analyze/report technicals for the symbol you provide; results depend on the provider's available data/tools and may be incomplete or stale. The optional Ollama fallback and TSX screener fetch Yahoo Finance data directly (adjusted prices).
+- The live snapshot tries the bare symbol first, then common Canadian suffixes such as `.TO`, which supports both US and TSX symbols.
 - Treat output as informational, not financial advice.
 - AI prompts can take time and require network/auth; failures are shown in notifications and stored per symbol.
 - For unattended daily checks, make sure your configured `ai.command` works non-interactively in a terminal.
