@@ -124,7 +124,7 @@ def get_universe(mode: str = "tsx_composite", limit: int = 0) -> list[dict[str, 
     if mode in ("tsx", "tsx_all", "tsx_directory"):
         return fetch_tsx_directory_symbols(limit=limit)
     rows = fetch_tsx_composite_symbols()
-    return rows if not limit or limit <= 0 else rows[: max(1, limit)]
+    return rows if not limit or limit <= 0 else rows[: max(1, int(limit))]
 
 
 def _sma(s: pd.Series, n: int) -> pd.Series:
@@ -191,7 +191,8 @@ def analyze_history(symbol: str, name: str, df: pd.DataFrame) -> ScreenHit | Non
         score += 12
         reasons.append("Price above SMA50")
 
-    if pd.notna(s20) and pd.notna(s50) and s20 > s50 and close.iloc[-5:].mean() > s20.iloc[-5]:
+    s20_recent = sma20.iloc[-5:]
+    if pd.notna(s20) and pd.notna(s50) and s20 > s50 and not s20_recent.empty and close.iloc[-5:].mean() > float(s20_recent.mean()):
         score += 10
         reasons.append("Short-term momentum above medium trend (SMA20 > SMA50)")
 

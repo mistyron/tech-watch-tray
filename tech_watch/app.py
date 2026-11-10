@@ -381,14 +381,8 @@ class DetailsDialog(QDialog):
         parts = []
         for sym in self.symbols:
             st = status.get(sym)
-            if not st:
-                continue
-            label = st
-            if st == "updating":
-                label = "updating"
-            elif st == "pending":
-                label = "pending"
-            parts.append(f"{sym}: {label}")
+            if st:
+                parts.append(f"{sym}: {st}")
         # include any symbols with status not in current symbol list
         for sym, st in status.items():
             if sym not in self.symbols:
@@ -407,12 +401,12 @@ class DetailsDialog(QDialog):
             checked = self._fmt_time(data.get("checked_at"))
             summary = str(data.get("summary") or "")
             status = self.check_status.get(symbol)
-            if status == "updating":
-                verdict = "UPDATING…"
-                summary = "Check in progress…"
-            elif status == "pending":
+            if status == "pending":
                 verdict = "PENDING"
                 summary = summary or "Queued for update…"
+            elif status:
+                verdict = "UPDATING…"
+                summary = str(status) or "Check in progress…"
             row = self.overview_table.rowCount()
             self.overview_table.insertRow(row)
             values = [symbol, verdict, checked, summary]
@@ -428,7 +422,7 @@ class DetailsDialog(QDialog):
                     item.setForeground(QColor(61, 174, 233))
                 elif col == 1 and verdict.upper() == "PENDING":
                     item.setForeground(Qt.GlobalColor.gray)
-                if status in {"updating", "pending"} and col in (0, 1):
+                if status and col in (0, 1):
                     font = item.font()
                     font.setItalic(True)
                     item.setFont(font)
@@ -981,6 +975,7 @@ class TrayApp(QObject):
             )
             return
         self.check_in_progress = True
+        self._check_status = {symbol: "pending" for symbol in symbols}
         self._update_tray_state()
         self._start_busy_indicator()
         self.tray.showMessage(
@@ -996,6 +991,7 @@ class TrayApp(QObject):
         thread = AnalysisWorker(symbols, self.cfg, signals)
         self._active_thread = thread
         self._sync_details_status()
+        self._refresh_details_data()
         thread.start()
         self._schedule_next_check()
         # Failsafe: don't leave UI stuck if a worker misbehaves (includes agy model retries + Ollama fallback).
