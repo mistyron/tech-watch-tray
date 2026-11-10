@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from .config import DEFAULT_CONFIG
+
 
 @dataclass
 class AnalysisResult:
@@ -30,8 +32,86 @@ class AnalysisResult:
         }
 
 
-VERDICT_RE = re.compile(r"(?im)^\s*VERDICT\s*:\s*(BUY|WAIT|HOLD|SELL)\b")
-SUMMARY_RE = re.compile(r"(?im)^\s*SUMMARY\s*:\s*(.+?)\s*$")
+_MD_LEAD = r"[- \t*_`#>]*"
+VERDICT_RE = re.compile(rf"(?im)^{_MD_LEAD}VERDICT[ \t*_`]*\s*:[ \t*_`]*\s*(BUY|WAIT|HOLD|SELL)\b")
+SUMMARY_RE = re.compile(rf"(?im)^{_MD_LEAD}SUMMARY[ \t*_`]*\s*:[ \t*_`]*\s*(.+?)[ \t*_`]*\s*$")
+
+_REFUSAL_MARKERS = (
+    "don't have access to live market data",
+    "do not have access to live market data",
+    "can't retrieve current",
+    "cannot retrieve current",
+    "unable to retrieve current",
+    "don't have real-time",
+    "do not have real-time",
+    "can't access real-time",
+    "cannot access real-time",
+    "as an ai language model",
+    "i'm unable to provide real-time",
+    "i am unable to provide real-time",
+    "i'm sorry, but i can't help",
+    "i’m sorry, but i can’t help",
+    "i'm sorry, but i cannot help",
+    "i cannot assist with",
+    "i can't assist with",
+    "i’m unable to assist",
+    "not able to provide financial advice",
+)
+
+_WAIT_CUES = (
+    "wait for breakout",
+    "wait for a breakout",
+    "wait for confirmation",
+    "wait for a confirmation",
+    "wait for pullback",
+    "wait for a pullback",
+    "wait for a better",
+    "wait for better",
+    "wait for a trigger",
+    "wait for a signal",
+    "wait for the signal",
+    "clear breakout signal is still needed",
+    "breakout signal is still needed",
+    "no clear breakout",
+    "not yet justified",
+    "before adding more capital wait",
+    "hold off until",
+    "hold off on adding",
+    "would wait",
+    "i would wait",
+    "confirmation is still needed",
+    "not a buy",
+    "not buy",
+    "avoid adding",
+    "don't add",
+    "do not add",
+)
+_CONDITIONAL_CUES = (
+    "add if ",
+    "add only if",
+    "add to the position only if",
+    "buy if ",
+    "buy only if",
+    "only add if",
+    "only buy if",
+    "consider adding if",
+    "add capital if",
+)
+_CONDITION_RE = re.compile(
+    r"\b(still needed|not yet|wait|before adding|confirmation|breakout above|breaks above|closes above|reclaim|trigger)\b"
+)
+_CAUTION_RE = re.compile(r"\b(wait|hold off|not yet|avoid buying|only if|if it breaks|if it closes|if price breaks)\b")
+
+
+def _strip_md(s: str) -> str:
+    return (s or "").strip().strip("*_`#> \t")
+
+
+def _has_caution(text: str) -> bool:
+    low = (text or "").lower()
+    if any(cue in low for cue in _WAIT_CUES):
+        return True
+    return any(cue in low for cue in _CONDITIONAL_CUES) and bool(_CONDITION_RE.search(low))
 
 
 def _resolve_command(cmd: str) -> str | None:
