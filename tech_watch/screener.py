@@ -121,10 +121,14 @@ def fetch_tsx_directory_symbols(limit: int = 0, timeout: int = 20) -> list[dict[
 
 def get_universe(mode: str = "tsx_composite", limit: int = 0) -> list[dict[str, str]]:
     mode = (mode or "tsx_composite").strip().lower()
+    try:
+        limit_i = int(limit or 0)
+    except (TypeError, ValueError):
+        limit_i = 0
     if mode in ("tsx", "tsx_all", "tsx_directory"):
-        return fetch_tsx_directory_symbols(limit=limit)
+        return fetch_tsx_directory_symbols(limit=limit_i)
     rows = fetch_tsx_composite_symbols()
-    return rows if not limit or limit <= 0 else rows[: max(1, int(limit))]
+    return rows if limit_i <= 0 else rows[: max(1, limit_i)]
 
 
 def _sma(s: pd.Series, n: int) -> pd.Series:

@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import QApplication
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import tech_watch.app as app_mod
+import tech_watch.screener as screener_mod
 
 
 @pytest.fixture(scope="session")
@@ -64,9 +65,9 @@ def test_screener_worker_success(monkeypatch, qapp):
         def to_dict(self):
             return {"symbol": "A.TO", "score": 60}
 
-    monkeypatch.setattr(app_mod, "get_universe", lambda mode, limit: [{"symbol": "A.TO"}])
+    monkeypatch.setattr(screener_mod, "get_universe", lambda mode, limit: [{"symbol": "A.TO"}])
     monkeypatch.setattr(
-        app_mod,
+        screener_mod,
         "screen_symbols",
         lambda u, min_score, progress_cb: progress_cb(1, 1, "A.TO") or [Hit()],
     )
@@ -88,10 +89,106 @@ def test_screener_worker_error(monkeypatch, qapp):
     def boom(*a, **k):
         raise RuntimeError("bad")
 
-    monkeypatch.setattr(app_mod, "get_universe", boom)
+    monkeypatch.setattr(screener_mod, "get_universe", boom)
     w = app_mod.ScreenerWorker("tsx_composite", 55, 10, signals)
     w.run()
     assert "bad" in out["e"]
+
+
+def test_analysis_worker_continues_after_exception(monkeypatch, qapp):
+    calls = []
+    signals = app_mod.WorkerSignals()
+    signals.result.connect(lambda r: calls.append(("r", r)))
+    signals.finished.connect(lambda: calls.append(("f",)))
+
+    def fake_query(sym, cfg, progress=None):
+        if sym == "A":
+            raise RuntimeError("boom")
+        return app_mod.AnalysisResult(sym, "BUY", "ok", "body", True, "", "t")
+
+    monkeypatch.setattr(app_mod, "query_gemini", fake_query)
+    w = app_mod.AnalysisWorker(["A", "B"], {}, signals)
+    w.run()
+
+    results = {}
+    for item in calls:
+        if item[0] == "r":
+            results[item[1].symbol] = item[1]
+    assert results["A"].verdict == "ERROR" and "boom" in results["A"].error
+    assert results["B"].verdict == "BUY"
+    assert calls[-1] == ("f",)
+
+
+def test_finished_clears_status_and_syncs_dialog():
+    class FakeTray:
+        _on_finished = app_mod.TrayApp._on_finished
+
+        def __init__(self):
+            self.check_in_progress = True
+            self._active_thread = object()
+            self._check_status = {"A": "pending"}
+            self.calls = []
+            self._sync_details_status = lambda: self.calls.append("sync")
+            self._rebuild_menu = lambda: self.calls.append("menu")
+            self._refresh_details_data = lambda: self.calls.append("data")
+
+    tray = FakeTray()
+    tray._on_finished()
+    assert tray.check_in_progress is False
+    assert tray._active_thread is None
+    assert tray._check_status == {}
+    assert tray.calls == ["sync", "menu", "data"]
+
+
+def test_watchdog_resets_even_if_worker_still_alive():
+    class FakeTray:
+        _check_watchdog = app_mod.TrayApp._check_watchdog
+
+        def __init__(self):
+            self.check_in_progress = True
+            self._active_thread = type("T", (), {"is_alive": lambda self: True})()
+            self._check_status = {"A": "pending"}
+            self.calls = []
+            self._sync_details_status = lambda: self.calls.append("sync")
+            self._rebuild_menu = lambda: self.calls.append("menu")
+            self._refresh_details_data = lambda: self.calls.append("data")
+            self.messages = []
+            self.tray = type(
+                "Tray",
+                (),
+                {"showMessage": lambda self, *a, **k: self.owner.messages.append(a)},
+            )()
+            self.tray.owner = self
+
+    tray = FakeTray()
+    tray._check_watchdog()
+    assert tray.check_in_progress is False
+    assert tray._check_status == {}
+    assert tray.calls == ["sync", "menu", "data"]
+    assert "still running" in tray.messages[0][1]
+
+
+def test_stale_check_generation_is_ignored():
+    class FakeTray:
+        _on_finished = app_mod.TrayApp._on_finished
+        _check_watchdog = app_mod.TrayApp._check_watchdog
+
+        def __init__(self):
+            self.check_in_progress = True
+            self._active_thread = object()
+            self._check_status = {"A": "pending"}
+            self._check_generation = 2
+            self.calls = []
+            self._sync_details_status = lambda: self.calls.append("sync")
+            self._rebuild_menu = lambda: self.calls.append("menu")
+            self._refresh_details_data = lambda: self.calls.append("data")
+
+    tray = FakeTray()
+    tray._on_finished(1)
+    tray._check_watchdog(1)
+    assert tray.check_in_progress is True
+    assert tray._check_status == {"A": "pending"}
+    assert tray.calls == []
 
 
 def test_main_no_tray(monkeypatch):

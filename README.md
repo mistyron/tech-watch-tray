@@ -16,13 +16,15 @@ A small Linux tray application for KDE/Plasma that monitors stock/security techn
 - Linux KDE/Plasma session with system tray support.
 - Python 3.10+.
 - `PyQt6`.
+- Optional, for the TSX screener and Ollama live-data fallback: `pip install -e '.[screener]'`
+  (numpy, pandas, requests, yfinance, lxml).
 - A working **AI command** that can answer a prompt from the CLI. Default config tries:
 
   ```bash
   gemini -p "<prompt>"
   ```
 
-  If your `gemini` CLI no longer works for your account (see troubleshooting), change `ai.command` in the config or use the tray menu: **Set AI command...** The command must accept the prompt; use `{prompt}` as a placeholder. Example: `agy -p {prompt}` (if you have an Antigravity CLI installed), or any script/wrapper that prints the model response to stdout.
+  If your `gemini` CLI no longer works for your account (see troubleshooting), change `ai.command` in the config or use the tray menu: **Settings...** The command must accept the prompt; use `{prompt}` as a placeholder. Example: `agy -p {prompt}` (if you have an Antigravity CLI installed), or any script/wrapper that prints the model response to stdout.
 
 ## Run
 
@@ -42,7 +44,7 @@ Config is stored at:
 
 - `$XDG_CONFIG_HOME/tech-watch/config.json` (usually `~/.config/tech-watch/config.json`)
 
-Tray menu actions: **Manage securities...** (add/remove symbols, interval), **Set AI command...**.
+Tray menu actions: **Check all now**, **Settings...** (symbols, interval, AI command, prompt), **TSX Screener...**, and **Open config file location**.
 
 Important config fields:
 
@@ -93,7 +95,7 @@ Adjust `Exec` if you move the project.
 
 ## Notes / limitations
 
-- This app does **not** fetch market data directly; it relies on the configured AI command/provider to analyze/report technicals for the symbol you provide. Results depend on the provider's available data/tools and may be incomplete or stale.
+- Normal checks rely on the configured AI command/provider to analyze/report technicals for the symbol you provide; results depend on the provider's available data/tools and may be incomplete or stale. The optional Ollama fallback and TSX screener fetch Yahoo Finance data directly.
 - Treat output as informational, not financial advice.
 - AI prompts can take time and require network/auth; failures are shown in notifications and stored per symbol.
 - For unattended daily checks, make sure your configured `ai.command` works non-interactively in a terminal.
