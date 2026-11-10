@@ -159,6 +159,19 @@ def test_screen_symbols_surfaces_download_failure(monkeypatch):
     assert any("network down" in e for e in errors)
 
 
+def test_screen_symbols_surfaces_empty_data(monkeypatch):
+    class EmptyYF:
+        def download(self, *a, **k):
+            return pd.DataFrame()
+
+    monkeypatch.setattr(screener, "yf", EmptyYF())
+    monkeypatch.setattr(screener.time, "sleep", lambda *_: None)
+    errors = []
+    hits = screener.screen_symbols([{"symbol": "X.TO", "name": "X"}], errors=errors)
+    assert hits == []
+    assert any("No data returned for batch" in e for e in errors)
+
+
 class SimpleNamespaceYF:
     def __init__(self, df):
         self._df = df

@@ -93,12 +93,15 @@ def test_yf_symbol():
 
 def test_yf_symbol_candidates_tries_us_and_tsx():
     assert gemini._yf_symbol_candidates("AAPL") == ["AAPL", "AAPL.TO"]
+    assert gemini._yf_symbol_candidates("$AAPL") == ["AAPL", "AAPL.TO"]
     assert gemini._yf_symbol_candidates("XIC") == ["XIC", "XIC.TO"]
     assert gemini._yf_symbol_candidates("XIC.TO") == ["XIC.TO"]
     assert gemini._yf_symbol_candidates("BBD.B") == ["BBD-B", "BBD-B.TO", "BBD.B"]
     assert gemini._yf_symbol_candidates("BBD.B.TO") == ["BBD-B.TO"]
+    assert gemini._yf_symbol_candidates("BRK.B") == ["BRK-B", "BRK-B.TO", "BRK.B"]
     assert gemini._yf_symbol_candidates("BRK-B") == ["BRK-B", "BRK-B.TO"]
     assert gemini._yf_symbol_candidates("^GSPC") == ["^GSPC"]
+    assert gemini._yf_symbol_candidates("EURUSD=X") == ["EURUSD=X"]
     assert gemini._yf_symbol_candidates("") == []
 
 
@@ -120,6 +123,39 @@ def test_fetch_live_snapshot_uses_adjusted_prices_and_candidates(monkeypatch):
     assert calls[1][0] == "AAPL.TO"
     assert all(kwargs["auto_adjust"] is True for _, kwargs in calls)
     assert "AAPL.TO" in text
+
+
+def test_fetch_live_snapshot_retries_after_candidate_exception(monkeypatch):
+    calls = []
+    idx = pd.date_range("2024-01-01", periods=60, freq="B")
+    df = pd.DataFrame({"Close": range(1, 61), "Volume": [1_000_000] * 60}, index=idx)
+
+    def download(symbol, **kwargs):
+        calls.append(symbol)
+        if symbol == "AAPL":
+            raise RuntimeError("temporary failure")
+        return df
+
+    monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(download=download))
+    text, err = gemini.fetch_live_snapshot("AAPL")
+    assert err == ""
+    assert calls == ["AAPL", "AAPL.TO"]
+    assert "AAPL.TO" in text
+
+
+def test_fetch_live_snapshot_reports_all_candidates_failed(monkeypatch):
+    calls = []
+
+    def download(symbol, **kwargs):
+        calls.append(symbol)
+        return pd.DataFrame()
+
+    monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(download=download))
+    text, err = gemini.fetch_live_snapshot("AAPL")
+    assert text == ""
+    assert calls == ["AAPL", "AAPL.TO"]
+    assert "tried AAPL, AAPL.TO" in err
+    assert "Last error: AAPL.TO: no data" in err
 
 
 def test_fmt_num():

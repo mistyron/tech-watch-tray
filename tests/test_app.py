@@ -81,6 +81,28 @@ def test_screener_worker_success(monkeypatch, qapp):
     assert out.get("p")
 
 
+def test_screener_worker_includes_partial_errors(monkeypatch, qapp):
+    signals = app_mod.ScreenerSignals()
+    out = {}
+    signals.done.connect(lambda r: out.setdefault("d", r))
+
+    class Hit:
+        score = 60
+
+        def to_dict(self):
+            return {"symbol": "A.TO", "score": 60}
+
+    def fake_screen(universe, min_score, progress_cb, errors=None):
+        errors.append("Y.TO: no data")
+        return [Hit()]
+
+    monkeypatch.setattr(app_mod, "get_universe", lambda mode, limit: [{"symbol": "A.TO"}])
+    monkeypatch.setattr(app_mod, "screen_symbols", fake_screen)
+    w = app_mod.ScreenerWorker("tsx_composite", 55, 10, signals)
+    w.run()
+    assert out["d"]["errors"] == ["Y.TO: no data"]
+
+
 def test_screener_worker_error(monkeypatch, qapp):
     signals = app_mod.ScreenerSignals()
     out = {}
@@ -111,6 +133,34 @@ def test_analysis_worker_cancel_stops_before_next_symbol(monkeypatch, qapp):
     worker.run()
     assert calls == ["A"]
     assert finished == [True]
+
+
+def test_cancel_check_calls_worker_and_notifies():
+    class Worker:
+        def __init__(self):
+            self.cancelled = False
+
+        def cancel(self):
+            self.cancelled = True
+
+    class FakeTray:
+        cancel_check = app_mod.TrayApp.cancel_check
+
+        def __init__(self):
+            self.worker = Worker()
+            self._active_thread = self.worker
+            self.messages = []
+            self.tray = type(
+                "Tray",
+                (),
+                {"showMessage": lambda self, *a, **k: self.owner.messages.append(a)},
+            )()
+            self.tray.owner = self
+
+    tray = FakeTray()
+    tray.cancel_check()
+    assert tray.worker.cancelled is True
+    assert "Cancelling" in tray.messages[0][1]
 
 
 def test_main_no_tray(monkeypatch):
