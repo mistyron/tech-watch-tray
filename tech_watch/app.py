@@ -430,7 +430,7 @@ class DetailsDialog(QDialog):
         for sym in list(self._status_since):
             if sym not in self.check_status:
                 del self._status_since[sym]
-        if self.check_status:
+        if any(st != "pending" for st in self.check_status.values()):
             self._status_timer.start()
         else:
             self._status_timer.stop()
@@ -448,20 +448,22 @@ class DetailsDialog(QDialog):
         return f"UPDATING {elapsed}" if elapsed else "UPDATING…"
 
     def _tick_status(self) -> None:
-        if not self.check_status:
+        active = {sym: st for sym, st in self.check_status.items() if st != "pending"}
+        if not active:
             self._status_timer.stop()
+            self._update_status_bar()
             return
         for row, symbol in enumerate(self.symbols):
             if row >= self.overview_table.rowCount():
                 break
-            if symbol not in self.check_status:
+            if symbol not in active:
                 continue
             verdict_item = self.overview_table.item(row, 1)
             summary_item = self.overview_table.item(row, 3)
             if verdict_item is not None:
                 verdict_item.setText(self._updating_label(symbol))
             if summary_item is not None:
-                summary_item.setText(self.check_status[symbol])
+                summary_item.setText(active[symbol])
         self._update_status_bar()
 
     def _update_status_bar(self) -> None:
@@ -469,21 +471,22 @@ class DetailsDialog(QDialog):
         if not status:
             self.status_label.setText("Ready")
             return
+        active = {sym: st for sym, st in status.items() if st != "pending"}
+        if not active:
+            self.status_label.setText("Checking — waiting for next security…")
+            return
         parts = []
         for sym in self.symbols:
-            st = status.get(sym)
+            st = active.get(sym)
             if st:
                 elapsed = self._elapsed_label(sym)
                 parts.append(f"{sym}: {st} ({elapsed})" if elapsed else f"{sym}: {st}")
-        # include any symbols with status not in current symbol list
-        for sym, st in status.items():
+        # include any active symbols not in the current symbol list
+        for sym, st in active.items():
             if sym not in self.symbols:
                 elapsed = self._elapsed_label(sym)
                 parts.append(f"{sym}: {st} ({elapsed})" if elapsed else f"{sym}: {st}")
-        if parts:
-            self.status_label.setText("Checking — " + " | ".join(parts))
-        else:
-            self.status_label.setText("Ready")
+        self.status_label.setText("Checking — " + " | ".join(parts))
 
     def _refresh_overview(self) -> None:
         results = self.cfg.get("last_results") if isinstance(self.cfg.get("last_results"), dict) else {}
@@ -519,7 +522,7 @@ class DetailsDialog(QDialog):
                     font = item.font()
                     font.setItalic(True)
                     item.setFont(font)
-                if status and col == 1:
+                if status and status != "pending" and col == 1:
                     elapsed = self._elapsed_label(symbol)
                     item.setToolTip(
                         f"Status: {status}\nElapsed: {elapsed or '0s'}\n"

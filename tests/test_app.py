@@ -50,6 +50,55 @@ def test_details_dialog_shows_elapsed_status(qapp):
     dlg.close()
 
 
+def test_details_dialog_only_ticks_active_status(qapp):
+    dlg = app_mod.DetailsDialog({"symbols": ["A.TO", "B.TO"], "last_results": {}})
+    started = datetime.now() - timedelta(seconds=75)
+    dlg.set_check_status(
+        {"A.TO": "receiving response", "B.TO": "pending"},
+        {"A.TO": started, "B.TO": started},
+    )
+    dlg._tick_status()
+    assert dlg.overview_table.item(0, 1).text().startswith("UPDATING 1m")
+    assert dlg.overview_table.item(1, 1).text() == "PENDING"
+    assert dlg.overview_table.item(1, 3).text() == "Queued for update…"
+    assert "A.TO" in dlg.status_label.text()
+    assert "B.TO" not in dlg.status_label.text()
+
+    dlg.set_check_status(
+        {"A.TO": "pending", "B.TO": "pending"},
+        {"A.TO": started, "B.TO": started},
+    )
+    assert not dlg._status_timer.isActive()
+    assert "waiting for next security" in dlg.status_label.text()
+    dlg.close()
+
+
+def test_on_progress_resets_timer_for_next_symbol():
+    old = datetime.now() - timedelta(seconds=30)
+
+    class FakeTray:
+        _on_progress = app_mod.TrayApp._on_progress
+
+        def __init__(self):
+            self._check_status = {"A.TO": "pending", "B.TO": "pending"}
+            self._status_since = {"A.TO": old, "B.TO": old}
+            self._check_generation = 0
+            self.calls = []
+            self._sync_details_status = lambda: self.calls.append("sync")
+
+    tray = FakeTray()
+    tray._on_progress("A.TO", "preparing check")
+    first_started = tray._status_since["A.TO"]
+    assert first_started > old
+
+    tray._on_progress("A.TO", "receiving response")
+    assert tray._status_since["A.TO"] == first_started
+
+    tray._on_progress("B.TO", "preparing check")
+    assert tray._status_since["B.TO"] > first_started
+    assert tray.calls == ["sync", "sync", "sync"]
+
+
 def test_manage_symbols_dialog_add_remove_apply(qapp, monkeypatch):
     cfg = {"symbols": ["XIC.TO", "HURA.TO"], "check_interval_hours": 24}
     dlg = app_mod.ManageSymbolsDialog(cfg)
