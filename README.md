@@ -42,7 +42,7 @@ Config is stored at:
 
 - `$XDG_CONFIG_HOME/tech-watch/config.json` (usually `~/.config/tech-watch/config.json`)
 
-Tray menu actions: **Check all now**, **Cancel check** (while a check is running), **Settings...** (symbols, interval, AI command, prompt), **TSX Screener...**, and **Open config file location**.
+Tray menu actions: **Check all now**, **Cancel check** (while a check is running), **Manage securities...** (add/remove symbols and set the check interval), **Settings...** (AI command, prompt, notifications, and other options), **TSX Screener...**, and **Open config file location**.
 
 Important config fields:
 

@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 from PyQt6.QtWidgets import QApplication
@@ -25,6 +25,140 @@ def test_fmt_time_formats_and_fallback():
     ts = "2024-05-06T13:14:15+00:00"
     assert app_mod._fmt_time(ts) == datetime.fromisoformat(ts).strftime("%Y-%m-%d %H:%M")
     assert app_mod._fmt_time("not-a-date") == "not-a-date"
+
+
+def test_fmt_elapsed():
+    now = datetime(2024, 1, 1, 12, 0, 0)
+    assert app_mod._fmt_elapsed(None, now) == ""
+    assert app_mod._fmt_elapsed(now - timedelta(seconds=5), now) == "5s"
+    assert app_mod._fmt_elapsed(now - timedelta(seconds=75), now) == "1m 15s"
+    assert app_mod._fmt_elapsed(now - timedelta(hours=2, minutes=5), now) == "2h 05m"
+
+
+def test_details_dialog_shows_elapsed_status(qapp):
+    dlg = app_mod.DetailsDialog({"symbols": ["HURA.TO"], "last_results": {}})
+    started = datetime.now() - timedelta(seconds=75)
+    dlg.set_check_status(
+        {"HURA.TO": "receiving response from agy [model]"},
+        {"HURA.TO": started},
+    )
+    assert dlg.overview_table.item(0, 1).text().startswith("UPDATING 1m")
+    assert "receiving response" in dlg.overview_table.item(0, 3).text()
+    assert "1m" in dlg.status_label.text()
+    dlg._status_timer.stop()
+    dlg.close()
+
+
+def test_manage_symbols_dialog_add_remove_apply(qapp, monkeypatch):
+    cfg = {"symbols": ["XIC.TO", "HURA.TO"], "check_interval_hours": 24}
+    dlg = app_mod.ManageSymbolsDialog(cfg)
+    assert [dlg.list_widget.item(i).text() for i in range(dlg.list_widget.count())] == ["XIC.TO", "HURA.TO"]
+
+    monkeypatch.setattr(app_mod.QInputDialog, "getText", lambda *a, **k: ("aapl", True))
+    dlg.add_symbol()
+    assert [dlg.list_widget.item(i).text() for i in range(dlg.list_widget.count())] == [
+        "XIC.TO",
+        "HURA.TO",
+        "AAPL",
+    ]
+
+    dlg.list_widget.item(0).setSelected(True)
+    dlg.remove_selected()
+    dlg.interval.setValue(6)
+    applied = dlg.apply()
+
+    assert applied is cfg
+    assert applied["symbols"] == ["HURA.TO", "AAPL"]
+    assert applied["check_interval_hours"] == 6
+    dlg.close()
+
+
+def test_tray_menu_keeps_expected_actions(qapp):
+    class FakeApp:
+        def quit(self):
+            pass
+
+    class FakeTray:
+        _rebuild_menu = app_mod.TrayApp._rebuild_menu
+
+        def __init__(self):
+            self.menu = app_mod.QMenu()
+            self.check_in_progress = False
+            self.cfg = {"symbols": ["XIC.TO"], "last_results": {}}
+            self.app = FakeApp()
+            self._results = lambda: {}
+            self._update_tray_state = lambda: None
+            self.run_daily_check = lambda: None
+            self.cancel_check = lambda: None
+            self.manage_symbols = lambda: None
+            self.show_settings = lambda: None
+            self.show_screener = lambda: None
+            self.show_config_location = lambda: None
+            self.show_details = lambda symbol=None: None
+
+    tray = FakeTray()
+    tray._rebuild_menu()
+    texts = [a.text() for a in tray.menu.actions() if not a.isSeparator()]
+    assert texts[:5] == [
+        "Check all now",
+        "Manage securities...",
+        "Settings...",
+        "TSX Screener...",
+        "Open config file location",
+    ]
+    assert any(t.startswith("XIC.TO:") for t in texts)
+    assert "Quit" in texts
+
+    tray.check_in_progress = True
+    tray._rebuild_menu()
+    texts = [a.text() for a in tray.menu.actions() if not a.isSeparator()]
+    assert "Cancel check" in texts
+    manage = next(a for a in tray.menu.actions() if a.text() == "Manage securities...")
+    assert not manage.isEnabled()
+
+
+def test_manage_symbols_saves_and_refreshes(monkeypatch):
+    cfg = {"symbols": ["XIC.TO"]}
+
+    class FakeDialog:
+        def __init__(self, dialog_cfg, parent=None):
+            self.cfg = dialog_cfg
+
+        def exec(self):
+            return app_mod.QDialog.DialogCode.Accepted
+
+        def apply(self):
+            self.cfg["symbols"] = ["AAPL"]
+            return self.cfg
+
+    monkeypatch.setattr(app_mod, "ManageSymbolsDialog", FakeDialog)
+
+    class FakeTray:
+        manage_symbols = app_mod.TrayApp.manage_symbols
+
+        def __init__(self):
+            self.cfg = cfg
+            self.calls = []
+
+        def _save(self):
+            self.calls.append("save")
+
+        def _apply_timer(self):
+            self.calls.append("timer")
+
+        def _rebuild_menu(self):
+            self.calls.append("menu")
+
+        def _refresh_details_data(self):
+            self.calls.append("data")
+
+        def _sync_details_status(self):
+            self.calls.append("sync")
+
+    tray = FakeTray()
+    tray.manage_symbols()
+    assert tray.cfg["symbols"] == ["AAPL"]
+    assert tray.calls == ["save", "timer", "menu", "data", "sync"]
 
 
 def test_tray_icon_and_pixmap(qapp):
@@ -133,6 +267,31 @@ def test_analysis_worker_cancel_stops_before_next_symbol(monkeypatch, qapp):
     worker.run()
     assert calls == ["A"]
     assert finished == [True]
+
+
+def test_finished_clears_status_and_syncs_details():
+    class FakeTray:
+        _on_finished = app_mod.TrayApp._on_finished
+
+        def __init__(self):
+            self.check_in_progress = True
+            self._active_thread = object()
+            self._check_status = {"HURA.TO": "receiving response"}
+            self._status_since = {"HURA.TO": datetime.now()}
+            self._check_started_at = datetime.now()
+            self.calls = []
+            self._rebuild_menu = lambda: self.calls.append("menu")
+            self._refresh_details_data = lambda: self.calls.append("data")
+            self._sync_details_status = lambda: self.calls.append("sync")
+
+    tray = FakeTray()
+    tray._on_finished()
+    assert tray.check_in_progress is False
+    assert tray._active_thread is None
+    assert tray._check_status == {}
+    assert tray._status_since == {}
+    assert tray._check_started_at is None
+    assert tray.calls == ["menu", "data", "sync"]
 
 
 def test_cancel_check_calls_worker_and_notifies():
