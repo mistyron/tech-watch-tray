@@ -16,6 +16,8 @@ A small Linux tray application for KDE/Plasma that monitors stock/security techn
 - Linux KDE/Plasma session with system tray support.
 - Python 3.10+.
 - `PyQt6`.
+- Optional, for the TSX screener and Ollama live-data fallback: `pip install -e '.[screener]'`
+  (numpy, pandas, requests, yfinance, lxml).
 - A working **AI command** that can answer a prompt from the CLI. Default config tries:
 
   ```bash

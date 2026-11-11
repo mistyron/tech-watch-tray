@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from .config import DEFAULT_CONFIG
+
 log = logging.getLogger(__name__)
 
 
@@ -33,8 +35,86 @@ class AnalysisResult:
         }
 
 
-VERDICT_RE = re.compile(r"(?im)^\s*VERDICT\s*:\s*(BUY|WAIT|HOLD|SELL)\b")
-SUMMARY_RE = re.compile(r"(?im)^\s*SUMMARY\s*:\s*(.+?)\s*$")
+_MD_LEAD = r"[- \t*_`#>]*"
+VERDICT_RE = re.compile(rf"(?im)^{_MD_LEAD}VERDICT[ \t*_`]*\s*:[ \t*_`]*\s*(BUY|WAIT|HOLD|SELL)\b")
+SUMMARY_RE = re.compile(rf"(?im)^{_MD_LEAD}SUMMARY[ \t*_`]*\s*:[ \t*_`]*\s*(.+?)[ \t*_`]*\s*$")
+
+_REFUSAL_MARKERS = (
+    "don't have access to live market data",
+    "do not have access to live market data",
+    "can't retrieve current",
+    "cannot retrieve current",
+    "unable to retrieve current",
+    "don't have real-time",
+    "do not have real-time",
+    "can't access real-time",
+    "cannot access real-time",
+    "as an ai language model",
+    "i'm unable to provide real-time",
+    "i am unable to provide real-time",
+    "i'm sorry, but i can't help",
+    "i’m sorry, but i can’t help",
+    "i'm sorry, but i cannot help",
+    "i cannot assist with",
+    "i can't assist with",
+    "i’m unable to assist",
+    "not able to provide financial advice",
+)
+
+_WAIT_CUES = (
+    "wait for breakout",
+    "wait for a breakout",
+    "wait for confirmation",
+    "wait for a confirmation",
+    "wait for pullback",
+    "wait for a pullback",
+    "wait for a better",
+    "wait for better",
+    "wait for a trigger",
+    "wait for a signal",
+    "wait for the signal",
+    "clear breakout signal is still needed",
+    "breakout signal is still needed",
+    "no clear breakout",
+    "not yet justified",
+    "before adding more capital wait",
+    "hold off until",
+    "hold off on adding",
+    "would wait",
+    "i would wait",
+    "confirmation is still needed",
+    "not a buy",
+    "not buy",
+    "avoid adding",
+    "don't add",
+    "do not add",
+)
+_CONDITIONAL_CUES = (
+    "add if ",
+    "add only if",
+    "add to the position only if",
+    "buy if ",
+    "buy only if",
+    "only add if",
+    "only buy if",
+    "consider adding if",
+    "add capital if",
+)
+_CONDITION_RE = re.compile(
+    r"\b(still needed|not yet|wait|before adding|confirmation|breakout above|breaks above|closes above|reclaim|trigger)\b"
+)
+_CAUTION_RE = re.compile(r"\b(wait|hold off|not yet|avoid buying|only if|if it breaks|if it closes|if price breaks)\b")
+
+
+def _strip_md(s: str) -> str:
+    return (s or "").strip().strip("*_`#> \t")
+
+
+def _has_caution(text: str) -> bool:
+    low = (text or "").lower()
+    if any(cue in low for cue in _WAIT_CUES):
+        return True
+    return any(cue in low for cue in _CONDITIONAL_CUES) and bool(_CONDITION_RE.search(low))
 
 
 def _resolve_command(cmd: str) -> str | None:
@@ -76,31 +156,7 @@ def _reconcile_verdict(verdict: str, summary: str, text: str) -> str:
     if verdict != "BUY":
         return verdict
     combined = f"{summary}\n{text or ''}".lower()
-    wait_cues = (
-        "wait for breakout",
-        "wait for a breakout",
-        "clear breakout signal is still needed",
-        "breakout signal is still needed",
-        "no clear breakout",
-        "not yet justified",
-        "before adding more capital wait",
-        "hold off until",
-        "wait for confirmation",
-        "confirmation is still needed",
-    )
-    conditional_cues = (
-        "add if ",
-        "add only if",
-        "add to the position only if",
-        "buy if ",
-        "consider adding if",
-        "add capital if",
-    )
-    if any(cue in combined for cue in wait_cues):
-        return "WAIT"
-    if any(cue in combined for cue in conditional_cues) and re.search(
-        r"\b(still needed|not yet|wait|before adding|confirmation|breakout above)\b", combined
-    ):
+    if _has_caution(combined):
         return "WAIT"
     return verdict
 
@@ -113,11 +169,15 @@ def parse_analysis(symbol: str, text: str) -> tuple[str, str]:
         verdict = m.group(1).upper()
     else:
         low = (text or "").lower()
-        if re.search(r"\b(buy|add capital|accumulate|strong buy)\b", low) and not re.search(
-            r"\b(wait|hold off|not yet|avoid buying)\b", low
+        if (
+            re.search(r"\b(buy|add capital|accumulate|strong buy)\b", low)
+            and not _has_caution(low)
+            and not _CAUTION_RE.search(low)
         ):
             verdict = "BUY"
-        elif re.search(r"\b(wait and see|wait|hold off|not yet|neutral)\b", low):
+        elif _has_caution(low) or _CAUTION_RE.search(low) or re.search(
+            r"\b(wait and see|wait|hold off|not yet|neutral)\b", low
+        ):
             verdict = "WAIT"
         elif re.search(r"\b(sell|selling|sold)\b", low):
             verdict = "SELL"
@@ -125,11 +185,11 @@ def parse_analysis(symbol: str, text: str) -> tuple[str, str]:
             verdict = "HOLD"
     ms = SUMMARY_RE.search(text or "")
     if ms:
-        summary = ms.group(1).strip()
+        summary = _strip_md(ms.group(1))
     if not summary:
         for line in (text or "").splitlines():
-            s = line.strip()
-            if s and not s.upper().startswith("VERDICT:"):
+            s = _strip_md(line)
+            if s and not VERDICT_RE.match(s) and not s.lower().startswith("summary"):
                 summary = s[:200]
                 break
     verdict = _reconcile_verdict(verdict, summary, text or "")
@@ -143,13 +203,13 @@ def _command_argv(symbol: str, prompt: str, cfg: dict[str, Any]) -> list[str] | 
         return None
     argv: list[str] = []
     for part in cmd:
-        s = str(part)
-        argv.append(s.format(prompt=prompt, symbol=symbol))
+        s = str(part).replace("{symbol}", symbol)
+        argv.append(s.replace("{prompt}", prompt))
     if not argv:
         return None
     resolved = _resolve_command(argv[0])
     if not resolved:
-        return [argv[0]]
+        return argv
     argv[0] = resolved
     return argv
 
@@ -406,6 +466,20 @@ def _is_missing_command_error(text: str) -> bool:
     return any(m in low for m in markers)
 
 
+def _is_refusal_error(text: str) -> bool:
+    low = (text or "").lower()
+    return any(marker in low for marker in _REFUSAL_MARKERS)
+
+
+def _is_timeout_error(text: str) -> bool:
+    low = (text or "").lower()
+    return "timed out" in low or "timeout" in low
+
+
+def _is_unusable_error(text: str) -> bool:
+    return "unusable analysis" in (text or "").lower()
+
+
 def _ollama_fallback(
     symbol: str,
     prompt: str,
@@ -418,7 +492,14 @@ def _ollama_fallback(
     if not ai.get("fallback_on_quota", True):
         return None
     errs = [prior_errors] if isinstance(prior_errors, str) else list(prior_errors or [])
-    if not errs or not any(_is_fallback_error(e) or _is_missing_command_error(e) for e in errs):
+    if not errs or not any(
+        _is_fallback_error(e)
+        or _is_missing_command_error(e)
+        or _is_refusal_error(e)
+        or _is_timeout_error(e)
+        or _is_unusable_error(e)
+        for e in errs
+    ):
         return None
     model = str(ai.get("ollama_model") or "llama3.2:1b").strip() or "llama3.2:1b"
     cmd = str(ai.get("ollama_command") or "ollama").strip() or "ollama"
@@ -484,50 +565,38 @@ def _ollama_fallback(
         except Exception:
             pass
     verdict, summary = parse_analysis(symbol, text)
+    if _is_unusable_analysis(text, verdict):
+        note = (
+            f"Prior AI attempts failed:\n{prior_text}\n"
+            f"Ollama fallback ({model}) returned no usable verdict:\n{(text or '(empty response)')[:500]}"
+        )
+        return AnalysisResult(
+            symbol,
+            "ERROR",
+            "Ollama fallback returned no usable verdict",
+            note,
+            False,
+            note,
+            checked_at,
+        )
     header = (
         f"[Fallback: local Ollama {model} using live Yahoo Finance snapshot because prior AI attempts failed]\n"
         f"Prior attempts:\n{prior_text}\n\n"
         f"{snapshot}\n\n---\n\n"
     )
     full_text = header + text
-    ok = verdict != "UNKNOWN" or bool(out)
-    return AnalysisResult(symbol, verdict, summary or "(no summary)", full_text, ok, "", checked_at)
+    return AnalysisResult(symbol, verdict, summary or "(no summary)", full_text, True, "", checked_at)
 
 
 def _is_unusable_analysis(text: str, verdict: str) -> bool:
     low = (text or "").lower()
-    refusal_markers = (
-        "don't have access to live market data",
-        "do not have access to live market data",
-        "can't retrieve current",
-        "cannot retrieve current",
-        "unable to retrieve current",
-        "don't have real-time",
-        "do not have real-time",
-        "can't access real-time",
-        "cannot access real-time",
-        "as an ai language model",
-        "i'm unable to provide real-time",
-        "i am unable to provide real-time",
-        "i'm sorry, but i can't help",
-        "i’m sorry, but i can’t help",
-        "i'm sorry, but i cannot help",
-        "i cannot assist with",
-        "i can't assist with",
-        "i’m unable to assist",
-        "not able to provide financial advice",
-    )
-    if verdict not in {"BUY", "WAIT", "HOLD", "SELL"} and any(m in low for m in refusal_markers):
+    has_verdict = bool(VERDICT_RE.search(text or ""))
+    has_refusal = _is_refusal_error(low)
+    if has_refusal and not (has_verdict and ("snapshot" in low or "provided data" in low)):
         return True
-    has_verdict_line = bool(re.search(r"(?im)^\s*VERDICT\s*:\s*(BUY|WAIT|HOLD|SELL)\b", text or ""))
-    if not has_verdict_line:
-        # This app requires an explicit actionable verdict; generic refusals or unstructured replies
-        # should fall through to other agy models / Ollama+live snapshot fallback.
-        if any(m in low for m in refusal_markers):
-            return True
-        if verdict == "UNKNOWN" and len((text or "").strip()) < 280:
-            return True
-    return False
+    # This app requires an explicit actionable verdict; unstructured replies should
+    # fall through to other agy models / Ollama+live snapshot fallback.
+    return not has_verdict
 
 
 def _model_label(argv: list[str]) -> str:
@@ -581,7 +650,8 @@ def _run_analysis_command(
     if verdict == "UNKNOWN" and proc.returncode != 0:
         return None, (err or text or "unknown verdict")
     if _is_unusable_analysis(text, verdict):
-        return None, (text[:300] or err or "model refused / missing live-data verdict")
+        detail = (text or err or "missing actionable verdict")[:300]
+        return None, f"unusable analysis: {detail}"
     return AnalysisResult(symbol, verdict, summary or "(no summary)", text, ok, primary_err, checked_at), ""
 
 
@@ -589,12 +659,7 @@ def _agy_fallback_models(argv: list[str], cfg: dict[str, Any]) -> list[str]:
     ai = cfg.get("ai") if isinstance(cfg.get("ai"), dict) else {}
     models = ai.get("agy_fallback_models")
     if not isinstance(models, list):
-        models = (DEFAULT_AGY_FALLBACK_MODELS if "DEFAULT_AGY_FALLBACK_MODELS" in globals() else [
-            "gpt-oss-120b-medium",
-            "claude-sonnet-4-6",
-            "gemini-3.8-flash-medium",
-            "gemini-3.8-flash-low",
-        ])
+        models = list(DEFAULT_CONFIG["ai"]["agy_fallback_models"])
     current = _current_agy_model(argv)
     out: list[str] = []
     for m in models:
@@ -608,7 +673,7 @@ def _agy_fallback_models(argv: list[str], cfg: dict[str, Any]) -> list[str]:
 def query_gemini(symbol: str, cfg: dict[str, Any], timeout: int | None = None, progress: Any = None) -> AnalysisResult:
     checked_at = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
     template = str(cfg.get("query_template") or "")
-    prompt = template.format(symbol=symbol)
+    prompt = template.replace("{symbol}", symbol)
     ai = cfg.get("ai") if isinstance(cfg.get("ai"), dict) else {}
     if timeout is None:
         try:
@@ -635,7 +700,12 @@ def query_gemini(symbol: str, cfg: dict[str, Any], timeout: int | None = None, p
         label = f"agy [{_current_agy_model(argv)}]"
     attempts.append((label, err))
 
-    if _is_agy_command(argv) and _is_fallback_error(err):
+    if _is_agy_command(argv) and (
+        _is_fallback_error(err)
+        or _is_refusal_error(err)
+        or _is_timeout_error(err)
+        or _is_unusable_error(err)
+    ):
         for model in _agy_fallback_models(argv, cfg):
             if progress:
                 try:

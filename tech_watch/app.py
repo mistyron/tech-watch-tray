@@ -42,7 +42,6 @@ from PyQt6.QtWidgets import (
 from .config import config_path, load_config, save_config
 from .gemini import AnalysisResult, query_gemini
 from .logging_setup import setup_logging
-from .screener import get_universe, screen_symbols
 
 log = logging.getLogger(__name__)
 
@@ -179,7 +178,19 @@ class AnalysisWorker(threading.Thread):
                 if self._cancel.is_set():
                     break
                 self.signals.progress.emit(symbol, "preparing check")
-                result = query_gemini(symbol, self.cfg, progress=progress)
+                try:
+                    result = query_gemini(symbol, self.cfg, progress=progress)
+                except Exception as e:
+                    checked_at = datetime.now().astimezone().isoformat(timespec="seconds")
+                    result = AnalysisResult(
+                        symbol,
+                        "ERROR",
+                        f"Check failed: {e}",
+                        "",
+                        False,
+                        str(e),
+                        checked_at,
+                    )
                 self.signals.progress.emit(symbol, "formatting reply")
                 self.signals.result.emit(result)
                 for pending in self.symbols[i + 1 :]:
@@ -198,6 +209,8 @@ class ScreenerWorker(threading.Thread):
 
     def run(self) -> None:
         try:
+            from .screener import get_universe, screen_symbols
+
             universe = get_universe(self.mode, limit=self.limit)
             min_score = self.min_score
             errors: list[str] = []
@@ -216,6 +229,10 @@ class ScreenerWorker(threading.Thread):
                 "min_score": min_score,
                 "errors": errors[:20],
             })
+        except ImportError as e:
+            self.signals.error.emit(
+                f"TSX screener dependencies unavailable ({e}). Install with: pip install .[screener]"
+            )
         except Exception as e:
             log.exception("TSX screener failed")
             self.signals.error.emit(str(e))
@@ -851,6 +868,7 @@ class TrayApp(QObject):
         self._check_status: dict[str, str] = {}
         self._status_since: dict[str, datetime] = {}
         self._check_started_at: datetime | None = None
+        self._check_generation = 0
         self._busy_angle = 0
         self._busy_base_icon: QIcon | None = None
 
@@ -1086,6 +1104,8 @@ class TrayApp(QObject):
             return
         self.check_in_progress = True
         self._check_started_at = datetime.now()
+        self._check_generation += 1
+        generation = self._check_generation
         self._check_status = {symbol: "pending" for symbol in symbols}
         self._status_since = {symbol: self._check_started_at for symbol in symbols}
         self._update_tray_state()
@@ -1098,9 +1118,9 @@ class TrayApp(QObject):
             5000,
         )
         signals = WorkerSignals()
-        signals.progress.connect(self._on_progress)
-        signals.result.connect(self._on_result)
-        signals.finished.connect(self._on_finished)
+        signals.progress.connect(lambda s, st, g=generation: self._on_progress(s, st, g))
+        signals.result.connect(lambda r, g=generation: self._on_result(r, g))
+        signals.finished.connect(lambda g=generation: self._on_finished(g))
         thread = AnalysisWorker(symbols, self.cfg, signals)
         self._active_thread = thread
         self._sync_details_status()
@@ -1113,7 +1133,10 @@ class TrayApp(QObject):
         ot = int(ai.get("ollama_timeout_seconds") or 180)
         models = ai.get("agy_fallback_models") if isinstance(ai.get("agy_fallback_models"), list) else []
         per_symbol = max(60, t * (1 + len(models)) + ot + 60)
-        QTimer.singleShot(max(30_000, len(symbols) * per_symbol * 1000), self._check_watchdog)
+        QTimer.singleShot(
+            max(30_000, len(symbols) * per_symbol * 1000),
+            lambda g=generation: self._check_watchdog(g),
+        )
 
     def _sync_details_status(self) -> None:
         dlg = self._details_dialog
@@ -1125,7 +1148,9 @@ class TrayApp(QObject):
         if dlg is not None and dlg.isVisible():
             dlg.update_data(self.cfg)
 
-    def _on_progress(self, symbol: str, status: str) -> None:
+    def _on_progress(self, symbol: str, status: str, generation: int | None = None) -> None:
+        if generation is not None and generation != self._check_generation:
+            return
         if symbol:
             previous = self._check_status.get(symbol)
             if previous == "pending" and status != "pending":
@@ -1135,7 +1160,9 @@ class TrayApp(QObject):
             self._check_status[symbol] = status
         self._sync_details_status()
 
-    def _on_result(self, result_obj: object) -> None:
+    def _on_result(self, result_obj: object, generation: int | None = None) -> None:
+        if generation is not None and generation != self._check_generation:
+            return
         if not isinstance(result_obj, AnalysisResult):
             return
         results = self._results()
@@ -1175,7 +1202,9 @@ class TrayApp(QObject):
                 15000,
             )
 
-    def _on_finished(self) -> None:
+    def _on_finished(self, generation: int | None = None) -> None:
+        if generation is not None and generation != self._check_generation:
+            return
         self.check_in_progress = False
         self._active_thread = None
         self._check_status = {}
@@ -1185,12 +1214,13 @@ class TrayApp(QObject):
         self._refresh_details_data()
         self._sync_details_status()
 
-    def _check_watchdog(self) -> None:
+    def _check_watchdog(self, generation: int | None = None) -> None:
+        if generation is not None and generation != self._check_generation:
+            return
         if not self.check_in_progress:
             return
         t = self._active_thread
-        if t is not None and t.is_alive():
-            return
+        alive = t is not None and t.is_alive()
         self.check_in_progress = False
         self._active_thread = None
         self._check_status = {}
@@ -1199,7 +1229,12 @@ class TrayApp(QObject):
         self._rebuild_menu()
         self._refresh_details_data()
         self._sync_details_status()
-        self.tray.showMessage("Tech Watch Tray", "Check state was reset after a stalled check.", QSystemTrayIcon.MessageIcon.Warning, 8000)
+        msg = (
+            "Check state was reset after a stalled check (worker is still running)."
+            if alive
+            else "Check state was reset after a stalled check."
+        )
+        self.tray.showMessage("Tech Watch Tray", msg, QSystemTrayIcon.MessageIcon.Warning, 8000)
 
     def cancel_check(self) -> None:
         t = self._active_thread

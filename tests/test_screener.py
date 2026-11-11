@@ -234,3 +234,33 @@ def test_fetch_tsx_directory_symbols(monkeypatch):
     monkeypatch.setattr(screener.requests, "get", lambda *a, **k: Resp())
     rows = screener.fetch_tsx_directory_symbols(limit=10)
     assert rows == [{"symbol": "RY.TO", "name": "Royal", "source_symbol": "RY"}]
+
+
+def test_get_universe_limit_accepts_numeric_string(monkeypatch):
+    monkeypatch.setattr(
+        screener,
+        "fetch_tsx_composite_symbols",
+        lambda timeout=20: [{"symbol": "A.TO"}, {"symbol": "B.TO"}],
+    )
+    assert screener.get_universe("tsx_composite", limit="1") == [{"symbol": "A.TO"}]
+
+
+def test_analyze_history_minimum_bars_does_not_crash():
+    n = 60
+    idx = pd.date_range("2024-01-01", periods=n, freq="B")
+    close = np.linspace(10, 12, n)
+    df = pd.DataFrame({"Close": close, "Volume": 1e6}, index=idx)
+    hit = screener.analyze_history("X.TO", "X", df)
+    assert hit is not None
+    assert 0 <= hit.score <= 100
+    assert hit.risk_label in {"Low", "Medium", "High", "Very High"}
+
+
+def test_screen_symbols_handles_download_failure(monkeypatch):
+    class BadYF:
+        def download(self, *a, **k):
+            raise RuntimeError("network down")
+
+    monkeypatch.setattr(screener, "yf", BadYF())
+    monkeypatch.setattr(screener.time, "sleep", lambda *_: None)
+    assert screener.screen_symbols([{"symbol": "X.TO", "name": "X"}], min_score=0) == []
