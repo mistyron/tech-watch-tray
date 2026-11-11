@@ -1,5 +1,4 @@
-import html
-import math
+import logging
 import shlex
 import signal
 import sys
@@ -42,7 +41,9 @@ from PyQt6.QtWidgets import (
 
 from .config import config_path, load_config, save_config
 from .gemini import AnalysisResult, query_gemini
-from .screener import get_universe, screen_symbols
+from .logging_setup import setup_logging
+
+log = logging.getLogger(__name__)
 
 
 def _fmt_time(ts: str | None) -> str:
@@ -53,6 +54,19 @@ def _fmt_time(ts: str | None) -> str:
         return dt.strftime("%Y-%m-%d %H:%M")
     except Exception:
         return ts
+
+
+def _fmt_elapsed(started_at: datetime | None, now: datetime | None = None) -> str:
+    if started_at is None:
+        return ""
+    seconds = max(0, int(((now or datetime.now()) - started_at).total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {seconds:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m"
 
 
 def _tray_icon_pixmap(state: str, size: int = 64) -> QPixmap:
@@ -150,6 +164,10 @@ class AnalysisWorker(threading.Thread):
         self.symbols = list(symbols)
         self.cfg = dict(cfg)
         self.signals = signals
+        self._cancel = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel.set()
 
     def run(self) -> None:
         def progress(detail: str, sym: str = "") -> None:
@@ -157,8 +175,22 @@ class AnalysisWorker(threading.Thread):
 
         try:
             for i, symbol in enumerate(self.symbols):
+                if self._cancel.is_set():
+                    break
                 self.signals.progress.emit(symbol, "preparing check")
-                result = query_gemini(symbol, self.cfg, progress=progress)
+                try:
+                    result = query_gemini(symbol, self.cfg, progress=progress)
+                except Exception as e:
+                    checked_at = datetime.now().astimezone().isoformat(timespec="seconds")
+                    result = AnalysisResult(
+                        symbol,
+                        "ERROR",
+                        f"Check failed: {e}",
+                        "",
+                        False,
+                        str(e),
+                        checked_at,
+                    )
                 self.signals.progress.emit(symbol, "formatting reply")
                 self.signals.result.emit(result)
                 for pending in self.symbols[i + 1 :]:
@@ -177,12 +209,16 @@ class ScreenerWorker(threading.Thread):
 
     def run(self) -> None:
         try:
+            from .screener import get_universe, screen_symbols
+
             universe = get_universe(self.mode, limit=self.limit)
             min_score = self.min_score
+            errors: list[str] = []
             hits = screen_symbols(
                 universe,
                 min_score=1,
                 progress_cb=lambda d, t, s: self.signals.progress.emit(d, t, s),
+                errors=errors,
             )
             filtered = [h for h in hits if h.score >= min_score]
             self.signals.done.emit({
@@ -191,8 +227,14 @@ class ScreenerWorker(threading.Thread):
                 "scanned": len(universe),
                 "mode": self.mode,
                 "min_score": min_score,
+                "errors": errors[:20],
             })
+        except ImportError as e:
+            self.signals.error.emit(
+                f"TSX screener dependencies unavailable ({e}). Install with: pip install .[screener]"
+            )
         except Exception as e:
+            log.exception("TSX screener failed")
             self.signals.error.emit(str(e))
 
 
@@ -207,6 +249,7 @@ class ManageSymbolsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Symbols monitored daily (e.g., CGL.TO, HURA.TO):"))
         self.list_widget = QListWidget()
+        self.list_widget.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         for s in cfg.get("symbols", []):
             self.list_widget.addItem(QListWidgetItem(str(s)))
         layout.addWidget(self.list_widget)
@@ -250,8 +293,7 @@ class ManageSymbolsDialog(QDialog):
 
     def remove_selected(self) -> None:
         for item in self.list_widget.selectedItems():
-            row = self.list_widget.row(item)
-            self.list_widget.takeItem(row)
+            self.list_widget.takeItem(self.list_widget.row(item))
 
     def apply(self) -> dict[str, Any]:
         symbols = []
@@ -270,6 +312,7 @@ class DetailsDialog(QDialog):
         self.setWindowIcon(_tray_icon("idle"))
         self.cfg = cfg
         self.check_status: dict[str, str] = {}
+        self._status_since: dict[str, datetime] = {}
         self.setWindowTitle("Tech Watch Tray - Details")
         self.resize(940, 660)
         layout = QVBoxLayout(self)
@@ -320,6 +363,11 @@ class DetailsDialog(QDialog):
         self.status_label.setStyleSheet("QLabel { padding: 4px 6px; color: palette(mid); }")
         layout.addWidget(self.status_label)
 
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(1000)
+        self._status_timer.timeout.connect(self._tick_status)
+        self.finished.connect(lambda _: self._status_timer.stop())
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
         buttons.accepted.connect(self.accept)
@@ -365,13 +413,56 @@ class DetailsDialog(QDialog):
         except Exception:
             return ts
 
-    def set_check_status(self, status: dict[str, str] | None) -> None:
+    def set_check_status(
+        self,
+        status: dict[str, str] | None,
+        status_since: dict[str, datetime] | None = None,
+    ) -> None:
+        previous = self.check_status
         self.check_status = dict(status or {})
+        now = datetime.now()
+        if status_since is None:
+            for sym, st in self.check_status.items():
+                if previous.get(sym) != st or sym not in self._status_since:
+                    self._status_since[sym] = now
+        else:
+            self._status_since = dict(status_since)
+        for sym in list(self._status_since):
+            if sym not in self.check_status:
+                del self._status_since[sym]
+        if self.check_status:
+            self._status_timer.start()
+        else:
+            self._status_timer.stop()
         self._refresh_overview()
         self._update_status_bar()
         current = self.symbol_box.currentText().strip().upper()
         if current:
             self._load_symbol(current)
+
+    def _elapsed_label(self, symbol: str) -> str:
+        return _fmt_elapsed(self._status_since.get(symbol))
+
+    def _updating_label(self, symbol: str) -> str:
+        elapsed = self._elapsed_label(symbol)
+        return f"UPDATING {elapsed}" if elapsed else "UPDATING…"
+
+    def _tick_status(self) -> None:
+        if not self.check_status:
+            self._status_timer.stop()
+            return
+        for row, symbol in enumerate(self.symbols):
+            if row >= self.overview_table.rowCount():
+                break
+            if symbol not in self.check_status:
+                continue
+            verdict_item = self.overview_table.item(row, 1)
+            summary_item = self.overview_table.item(row, 3)
+            if verdict_item is not None:
+                verdict_item.setText(self._updating_label(symbol))
+            if summary_item is not None:
+                summary_item.setText(self.check_status[symbol])
+        self._update_status_bar()
 
     def _update_status_bar(self) -> None:
         status = self.check_status
@@ -382,11 +473,13 @@ class DetailsDialog(QDialog):
         for sym in self.symbols:
             st = status.get(sym)
             if st:
-                parts.append(f"{sym}: {st}")
+                elapsed = self._elapsed_label(sym)
+                parts.append(f"{sym}: {st} ({elapsed})" if elapsed else f"{sym}: {st}")
         # include any symbols with status not in current symbol list
         for sym, st in status.items():
             if sym not in self.symbols:
-                parts.append(f"{sym}: {st}")
+                elapsed = self._elapsed_label(sym)
+                parts.append(f"{sym}: {st} ({elapsed})" if elapsed else f"{sym}: {st}")
         if parts:
             self.status_label.setText("Checking — " + " | ".join(parts))
         else:
@@ -405,7 +498,7 @@ class DetailsDialog(QDialog):
                 verdict = "PENDING"
                 summary = summary or "Queued for update…"
             elif status:
-                verdict = "UPDATING…"
+                verdict = self._updating_label(symbol)
                 summary = str(status) or "Check in progress…"
             row = self.overview_table.rowCount()
             self.overview_table.insertRow(row)
@@ -426,6 +519,12 @@ class DetailsDialog(QDialog):
                     font = item.font()
                     font.setItalic(True)
                     item.setFont(font)
+                if status and col == 1:
+                    elapsed = self._elapsed_label(symbol)
+                    item.setToolTip(
+                        f"Status: {status}\nElapsed: {elapsed or '0s'}\n"
+                        "Use the tray menu's 'Cancel check' if this is taking too long."
+                    )
                 if col == 3 and summary:
                     item.setToolTip(summary)
                 self.overview_table.setItem(row, col, item)
@@ -698,11 +797,18 @@ class ScreenerDialog(QDialog):
         top = payload.get("top") or []
         scanned = payload.get("scanned") or 0
         min_score = payload.get("min_score") or self.min_score.value()
+        errors = payload.get("errors") or []
         show = self._hits if self._hits else top
         if self._hits:
-            self.status.setText(f"Scanned {scanned} symbols. Found {len(self._hits)} match(es) with score >= {min_score}.")
+            text = f"Scanned {scanned} symbols. Found {len(self._hits)} match(es) with score >= {min_score}."
         else:
-            self.status.setText(f"Scanned {scanned} symbols. No symbols met score >= {min_score}; showing top {len(show)} by technical score (market may have few strong setups now).")
+            text = f"Scanned {scanned} symbols. No symbols met score >= {min_score}; showing top {len(show)} by technical score (market may have few strong setups now)."
+        if errors:
+            text += f" {len(errors)} data error(s); hover for details."
+            self.status.setToolTip("\n".join(str(e) for e in errors))
+        else:
+            self.status.setToolTip("")
+        self.status.setText(text)
         for hit in show:
             row = self.table.rowCount()
             self.table.insertRow(row)
@@ -760,6 +866,9 @@ class TrayApp(QObject):
         self._screener_dialog: ScreenerDialog | None = None
         self._settings_dialog: SettingsDialog | None = None
         self._check_status: dict[str, str] = {}
+        self._status_since: dict[str, datetime] = {}
+        self._check_started_at: datetime | None = None
+        self._check_generation = 0
         self._busy_angle = 0
         self._busy_base_icon: QIcon | None = None
 
@@ -814,6 +923,7 @@ class TrayApp(QObject):
             return
         self._busy_angle = (self._busy_angle + 30) % 360
         self.tray.setIcon(QIcon(self._busy_pixmap(self._busy_angle)))
+        self.tray.setToolTip(self._checking_tooltip())
 
     def _start_busy_indicator(self) -> None:
         self._busy_angle = 0
@@ -845,6 +955,16 @@ class TrayApp(QObject):
         header.triggered.connect(self.run_daily_check)
         header.setEnabled(not self.check_in_progress)
         self.menu.addAction(header)
+
+        if self.check_in_progress:
+            cancel_act = QAction("Cancel check", self.menu)
+            cancel_act.triggered.connect(self.cancel_check)
+            self.menu.addAction(cancel_act)
+
+        manage_act = QAction("Manage securities...", self.menu)
+        manage_act.triggered.connect(self.manage_symbols)
+        manage_act.setEnabled(not self.check_in_progress)
+        self.menu.addAction(manage_act)
 
         settings_act = QAction("Settings...", self.menu)
         settings_act.triggered.connect(self.show_settings)
@@ -886,9 +1006,14 @@ class TrayApp(QObject):
 
         self._update_tray_state()
 
+    def _checking_tooltip(self) -> str:
+        elapsed = _fmt_elapsed(self._check_started_at)
+        suffix = f" ({elapsed})" if elapsed else ""
+        return f"Tech Watch Tray: checking AI…{suffix}"
+
     def _update_tray_state(self) -> None:
         if self.check_in_progress:
-            self.tray.setToolTip("Tech Watch Tray: checking AI…")
+            self.tray.setToolTip(self._checking_tooltip())
             return
 
         self._stop_busy_indicator()
@@ -916,6 +1041,9 @@ class TrayApp(QObject):
             dlg = self._details_dialog
             if dlg is not None and dlg.isVisible():
                 dlg.hide()
+                return
+            if not self.cfg.get("symbols"):
+                self.manage_symbols()
                 return
             self.show_details(None)
 
@@ -975,8 +1103,13 @@ class TrayApp(QObject):
             )
             return
         self.check_in_progress = True
+        self._check_started_at = datetime.now()
+        self._check_generation += 1
+        generation = self._check_generation
         self._check_status = {symbol: "pending" for symbol in symbols}
+        self._status_since = {symbol: self._check_started_at for symbol in symbols}
         self._update_tray_state()
+        self._rebuild_menu()
         self._start_busy_indicator()
         self.tray.showMessage(
             "Tech Watch Tray",
@@ -985,9 +1118,9 @@ class TrayApp(QObject):
             5000,
         )
         signals = WorkerSignals()
-        signals.progress.connect(self._on_progress)
-        signals.result.connect(self._on_result)
-        signals.finished.connect(self._on_finished)
+        signals.progress.connect(lambda s, st, g=generation: self._on_progress(s, st, g))
+        signals.result.connect(lambda r, g=generation: self._on_result(r, g))
+        signals.finished.connect(lambda g=generation: self._on_finished(g))
         thread = AnalysisWorker(symbols, self.cfg, signals)
         self._active_thread = thread
         self._sync_details_status()
@@ -1000,24 +1133,36 @@ class TrayApp(QObject):
         ot = int(ai.get("ollama_timeout_seconds") or 180)
         models = ai.get("agy_fallback_models") if isinstance(ai.get("agy_fallback_models"), list) else []
         per_symbol = max(60, t * (1 + len(models)) + ot + 60)
-        QTimer.singleShot(max(30_000, len(symbols) * per_symbol * 1000), self._check_watchdog)
+        QTimer.singleShot(
+            max(30_000, len(symbols) * per_symbol * 1000),
+            lambda g=generation: self._check_watchdog(g),
+        )
 
     def _sync_details_status(self) -> None:
         dlg = self._details_dialog
         if dlg is not None and dlg.isVisible():
-            dlg.set_check_status(self._check_status)
+            dlg.set_check_status(self._check_status, self._status_since)
 
     def _refresh_details_data(self) -> None:
         dlg = self._details_dialog
         if dlg is not None and dlg.isVisible():
             dlg.update_data(self.cfg)
 
-    def _on_progress(self, symbol: str, status: str) -> None:
+    def _on_progress(self, symbol: str, status: str, generation: int | None = None) -> None:
+        if generation is not None and generation != self._check_generation:
+            return
         if symbol:
+            previous = self._check_status.get(symbol)
+            if previous == "pending" and status != "pending":
+                self._status_since[symbol] = datetime.now()
+            elif symbol not in self._status_since:
+                self._status_since[symbol] = datetime.now()
             self._check_status[symbol] = status
         self._sync_details_status()
 
-    def _on_result(self, result_obj: object) -> None:
+    def _on_result(self, result_obj: object, generation: int | None = None) -> None:
+        if generation is not None and generation != self._check_generation:
+            return
         if not isinstance(result_obj, AnalysisResult):
             return
         results = self._results()
@@ -1027,9 +1172,11 @@ class TrayApp(QObject):
         results[result_obj.symbol] = result_obj.to_dict()
         self.cfg["last_results"] = results
         self._check_status.pop(result_obj.symbol, None)
+        self._status_since.pop(result_obj.symbol, None)
         self._save()
         self._rebuild_menu()
         self._refresh_details_data()
+        self._sync_details_status()
 
         notify_on = {str(v).upper() for v in (self.cfg.get("notify_on") or ["BUY"])}
         verdict = (result_obj.verdict or "").upper()
@@ -1055,70 +1202,60 @@ class TrayApp(QObject):
                 15000,
             )
 
-    def _on_finished(self) -> None:
+    def _on_finished(self, generation: int | None = None) -> None:
+        if generation is not None and generation != self._check_generation:
+            return
         self.check_in_progress = False
         self._active_thread = None
         self._check_status = {}
+        self._status_since = {}
+        self._check_started_at = None
         self._rebuild_menu()
         self._refresh_details_data()
+        self._sync_details_status()
 
-    def _check_watchdog(self) -> None:
+    def _check_watchdog(self, generation: int | None = None) -> None:
+        if generation is not None and generation != self._check_generation:
+            return
         if not self.check_in_progress:
             return
         t = self._active_thread
-        if t is not None and t.is_alive():
-            return
+        alive = t is not None and t.is_alive()
         self.check_in_progress = False
         self._active_thread = None
         self._check_status = {}
+        self._status_since = {}
+        self._check_started_at = None
         self._rebuild_menu()
         self._refresh_details_data()
-        self.tray.showMessage("Tech Watch Tray", "Check state was reset after a stalled check.", QSystemTrayIcon.MessageIcon.Warning, 8000)
+        self._sync_details_status()
+        msg = (
+            "Check state was reset after a stalled check (worker is still running)."
+            if alive
+            else "Check state was reset after a stalled check."
+        )
+        self.tray.showMessage("Tech Watch Tray", msg, QSystemTrayIcon.MessageIcon.Warning, 8000)
+
+    def cancel_check(self) -> None:
+        t = self._active_thread
+        if t is not None and hasattr(t, "cancel"):
+            t.cancel()
+            self.tray.showMessage(
+                "Tech Watch Tray",
+                "Cancelling after the current symbol finishes.",
+                QSystemTrayIcon.MessageIcon.Information,
+                5000,
+            )
 
     def manage_symbols(self) -> None:
         dlg = ManageSymbolsDialog(self.cfg, None)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.cfg = dlg.apply()
-            # prune removed symbols from results? keep history; harmless
             self._save()
             self._apply_timer()
             self._rebuild_menu()
-
-    def set_ai_command(self) -> None:
-        import shlex
-
-        ai = self.cfg.get("ai") if isinstance(self.cfg.get("ai"), dict) else {}
-        current = ai.get("command") or ["gemini", "-p", "{prompt}"]
-        try:
-            current_s = shlex.join([str(x) for x in current])
-        except Exception:
-            current_s = 'gemini -p "{prompt}"'
-        text, ok = QInputDialog.getText(
-            None,
-            "Tech Watch Tray - AI command",
-            "Command argv (use {prompt} placeholder). Example: gemini -p {prompt}\n",
-            text=current_s,
-        )
-        if not ok:
-            return
-        try:
-            parts = shlex.split(text.strip())
-        except Exception as e:
-            QMessageBox.warning(None, "Tech Watch Tray", f"Could not parse command: {e}")
-            return
-        if not parts:
-            return
-        if not any("{prompt}" in p for p in parts):
-            parts.append("{prompt}")
-        self.cfg.setdefault("ai", {})["command"] = parts
-        self._save()
-        self._rebuild_menu()
-        self.tray.showMessage(
-            "Tech Watch Tray",
-            "AI command saved. Use 'Check all now' to test. If checks fail, the notification/details will show the command error.",
-            QSystemTrayIcon.MessageIcon.Information,
-            10000,
-        )
+            self._refresh_details_data()
+            self._sync_details_status()
 
     def _details_closed(self) -> None:
         self._details_dialog = None
@@ -1128,13 +1265,13 @@ class TrayApp(QObject):
         dlg = self._details_dialog
         if dlg is not None and dlg.isVisible():
             dlg.update_data(self.cfg, symbol)
-            dlg.set_check_status(self._check_status)
+            dlg.set_check_status(self._check_status, self._status_since)
             dlg.show()
             dlg.raise_()
             dlg.activateWindow()
             return
         dlg = DetailsDialog(self.cfg, symbol, None)
-        dlg.set_check_status(self._check_status)
+        dlg.set_check_status(self._check_status, self._status_since)
         self._details_dialog = dlg
         dlg.finished.connect(self._details_closed)
         dlg.show()
@@ -1191,6 +1328,7 @@ class TrayApp(QObject):
 
 
 def main(argv: list[str] | None = None) -> int:
+    setup_logging()
     argv = argv if argv is not None else sys.argv
     app = QApplication(argv)
     app.setQuitOnLastWindowClosed(False)

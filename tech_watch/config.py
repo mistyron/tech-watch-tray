@@ -1,3 +1,4 @@
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -27,9 +28,6 @@ DEFAULT_CONFIG = {
         "ollama_model": "llama3.2:1b",
         "ollama_timeout_seconds": 180,
     },
-    # Legacy/backward-compat fields (used if ai.command is absent/invalid)
-    "gemini_command": "gemini",
-    "gemini_args": ["-p"],
     "query_template": (
         "Analyze the current technical indicators for {symbol} (price trend, moving averages, "
         "RSI, MACD, volume, and key support/resistance if available). "
@@ -73,6 +71,8 @@ def load_config() -> dict[str, Any]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         data = {}
+    if not isinstance(data, dict):
+        data = {}
     merged = json.loads(json.dumps(DEFAULT_CONFIG))
     merged.update({k: v for k, v in data.items() if k != "ai" and v is not None})
     # deep-merge ai config
@@ -90,8 +90,21 @@ def load_config() -> dict[str, Any]:
         merged["notify_on"] = DEFAULT_CONFIG["notify_on"][:]
     mode = str(merged.get("check_on_startup") or "due").strip().lower()
     merged["check_on_startup"] = mode if mode in {"due", "always", "never"} else "due"
-    if not isinstance(merged.get("ai", {}).get("command"), list):
-        merged.setdefault("ai", {})["command"] = DEFAULT_CONFIG["ai"]["command"][:]
+    if not isinstance(user_ai.get("command"), list) or not user_ai.get("command"):
+        legacy_cmd = data.get("gemini_command")
+        legacy_args = data.get("gemini_args")
+        if isinstance(legacy_cmd, str) and legacy_cmd.strip():
+            if not isinstance(legacy_args, list):
+                legacy_args = ["-p"]
+            merged["ai"]["command"] = [
+                legacy_cmd.strip(),
+                *[str(arg) for arg in legacy_args],
+                "{prompt}",
+            ]
+        else:
+            merged["ai"]["command"] = DEFAULT_CONFIG["ai"]["command"][:]
+    merged.pop("gemini_command", None)
+    merged.pop("gemini_args", None)
     if not isinstance(merged.get("ai", {}).get("agy_fallback_models"), list):
         merged.setdefault("ai", {})["agy_fallback_models"] = DEFAULT_CONFIG["ai"]["agy_fallback_models"][:]
     return merged
@@ -99,6 +112,12 @@ def load_config() -> dict[str, Any]:
 
 def save_config(cfg: dict[str, Any]) -> None:
     path = config_path()
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(cfg, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    lock_path = path.with_suffix(".lock")
+    with lock_path.open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(cfg, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            tmp.replace(path)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)

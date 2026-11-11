@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 from PyQt6.QtWidgets import QApplication
@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import QApplication
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import tech_watch.app as app_mod
+import tech_watch.screener as screener_mod
 
 
 @pytest.fixture(scope="session")
@@ -25,6 +26,140 @@ def test_fmt_time_formats_and_fallback():
     ts = "2024-05-06T13:14:15+00:00"
     assert app_mod._fmt_time(ts) == datetime.fromisoformat(ts).strftime("%Y-%m-%d %H:%M")
     assert app_mod._fmt_time("not-a-date") == "not-a-date"
+
+
+def test_fmt_elapsed():
+    now = datetime(2024, 1, 1, 12, 0, 0)
+    assert app_mod._fmt_elapsed(None, now) == ""
+    assert app_mod._fmt_elapsed(now - timedelta(seconds=5), now) == "5s"
+    assert app_mod._fmt_elapsed(now - timedelta(seconds=75), now) == "1m 15s"
+    assert app_mod._fmt_elapsed(now - timedelta(hours=2, minutes=5), now) == "2h 05m"
+
+
+def test_details_dialog_shows_elapsed_status(qapp):
+    dlg = app_mod.DetailsDialog({"symbols": ["HURA.TO"], "last_results": {}})
+    started = datetime.now() - timedelta(seconds=75)
+    dlg.set_check_status(
+        {"HURA.TO": "receiving response from agy [model]"},
+        {"HURA.TO": started},
+    )
+    assert dlg.overview_table.item(0, 1).text().startswith("UPDATING 1m")
+    assert "receiving response" in dlg.overview_table.item(0, 3).text()
+    assert "1m" in dlg.status_label.text()
+    dlg._status_timer.stop()
+    dlg.close()
+
+
+def test_manage_symbols_dialog_add_remove_apply(qapp, monkeypatch):
+    cfg = {"symbols": ["XIC.TO", "HURA.TO"], "check_interval_hours": 24}
+    dlg = app_mod.ManageSymbolsDialog(cfg)
+    assert [dlg.list_widget.item(i).text() for i in range(dlg.list_widget.count())] == ["XIC.TO", "HURA.TO"]
+
+    monkeypatch.setattr(app_mod.QInputDialog, "getText", lambda *a, **k: ("aapl", True))
+    dlg.add_symbol()
+    assert [dlg.list_widget.item(i).text() for i in range(dlg.list_widget.count())] == [
+        "XIC.TO",
+        "HURA.TO",
+        "AAPL",
+    ]
+
+    dlg.list_widget.item(0).setSelected(True)
+    dlg.remove_selected()
+    dlg.interval.setValue(6)
+    applied = dlg.apply()
+
+    assert applied is cfg
+    assert applied["symbols"] == ["HURA.TO", "AAPL"]
+    assert applied["check_interval_hours"] == 6
+    dlg.close()
+
+
+def test_tray_menu_keeps_expected_actions(qapp):
+    class FakeApp:
+        def quit(self):
+            pass
+
+    class FakeTray:
+        _rebuild_menu = app_mod.TrayApp._rebuild_menu
+
+        def __init__(self):
+            self.menu = app_mod.QMenu()
+            self.check_in_progress = False
+            self.cfg = {"symbols": ["XIC.TO"], "last_results": {}}
+            self.app = FakeApp()
+            self._results = lambda: {}
+            self._update_tray_state = lambda: None
+            self.run_daily_check = lambda: None
+            self.cancel_check = lambda: None
+            self.manage_symbols = lambda: None
+            self.show_settings = lambda: None
+            self.show_screener = lambda: None
+            self.show_config_location = lambda: None
+            self.show_details = lambda symbol=None: None
+
+    tray = FakeTray()
+    tray._rebuild_menu()
+    texts = [a.text() for a in tray.menu.actions() if not a.isSeparator()]
+    assert texts[:5] == [
+        "Check all now",
+        "Manage securities...",
+        "Settings...",
+        "TSX Screener...",
+        "Open config file location",
+    ]
+    assert any(t.startswith("XIC.TO:") for t in texts)
+    assert "Quit" in texts
+
+    tray.check_in_progress = True
+    tray._rebuild_menu()
+    texts = [a.text() for a in tray.menu.actions() if not a.isSeparator()]
+    assert "Cancel check" in texts
+    manage = next(a for a in tray.menu.actions() if a.text() == "Manage securities...")
+    assert not manage.isEnabled()
+
+
+def test_manage_symbols_saves_and_refreshes(monkeypatch):
+    cfg = {"symbols": ["XIC.TO"]}
+
+    class FakeDialog:
+        def __init__(self, dialog_cfg, parent=None):
+            self.cfg = dialog_cfg
+
+        def exec(self):
+            return app_mod.QDialog.DialogCode.Accepted
+
+        def apply(self):
+            self.cfg["symbols"] = ["AAPL"]
+            return self.cfg
+
+    monkeypatch.setattr(app_mod, "ManageSymbolsDialog", FakeDialog)
+
+    class FakeTray:
+        manage_symbols = app_mod.TrayApp.manage_symbols
+
+        def __init__(self):
+            self.cfg = cfg
+            self.calls = []
+
+        def _save(self):
+            self.calls.append("save")
+
+        def _apply_timer(self):
+            self.calls.append("timer")
+
+        def _rebuild_menu(self):
+            self.calls.append("menu")
+
+        def _refresh_details_data(self):
+            self.calls.append("data")
+
+        def _sync_details_status(self):
+            self.calls.append("sync")
+
+    tray = FakeTray()
+    tray.manage_symbols()
+    assert tray.cfg["symbols"] == ["AAPL"]
+    assert tray.calls == ["save", "timer", "menu", "data", "sync"]
 
 
 def test_tray_icon_and_pixmap(qapp):
@@ -64,11 +199,11 @@ def test_screener_worker_success(monkeypatch, qapp):
         def to_dict(self):
             return {"symbol": "A.TO", "score": 60}
 
-    monkeypatch.setattr(app_mod, "get_universe", lambda mode, limit: [{"symbol": "A.TO"}])
+    monkeypatch.setattr(screener_mod, "get_universe", lambda mode, limit: [{"symbol": "A.TO"}])
     monkeypatch.setattr(
-        app_mod,
+        screener_mod,
         "screen_symbols",
-        lambda u, min_score, progress_cb: progress_cb(1, 1, "A.TO") or [Hit()],
+        lambda u, min_score, progress_cb, errors=None: progress_cb(1, 1, "A.TO") or [Hit()],
     )
     w = app_mod.ScreenerWorker("tsx_composite", 55, 10, signals)
     w.run()
@@ -76,8 +211,31 @@ def test_screener_worker_success(monkeypatch, qapp):
     assert out["d"]["scanned"] == 1
     assert out["d"]["mode"] == "tsx_composite"
     assert out["d"]["min_score"] == 55
+    assert out["d"]["errors"] == []
     assert "e" not in out
     assert out.get("p")
+
+
+def test_screener_worker_includes_partial_errors(monkeypatch, qapp):
+    signals = app_mod.ScreenerSignals()
+    out = {}
+    signals.done.connect(lambda r: out.setdefault("d", r))
+
+    class Hit:
+        score = 60
+
+        def to_dict(self):
+            return {"symbol": "A.TO", "score": 60}
+
+    def fake_screen(universe, min_score, progress_cb, errors=None):
+        errors.append("Y.TO: no data")
+        return [Hit()]
+
+    monkeypatch.setattr(screener_mod, "get_universe", lambda mode, limit: [{"symbol": "A.TO"}])
+    monkeypatch.setattr(screener_mod, "screen_symbols", fake_screen)
+    w = app_mod.ScreenerWorker("tsx_composite", 55, 10, signals)
+    w.run()
+    assert out["d"]["errors"] == ["Y.TO: no data"]
 
 
 def test_screener_worker_error(monkeypatch, qapp):
@@ -88,15 +246,166 @@ def test_screener_worker_error(monkeypatch, qapp):
     def boom(*a, **k):
         raise RuntimeError("bad")
 
-    monkeypatch.setattr(app_mod, "get_universe", boom)
+    monkeypatch.setattr(screener_mod, "get_universe", boom)
     w = app_mod.ScreenerWorker("tsx_composite", 55, 10, signals)
     w.run()
     assert "bad" in out["e"]
 
 
+def test_analysis_worker_cancel_stops_before_next_symbol(monkeypatch, qapp):
+    calls = []
+    finished = []
+    signals = app_mod.WorkerSignals()
+    signals.finished.connect(lambda: finished.append(True))
+    worker = app_mod.AnalysisWorker(["A", "B"], {}, signals)
+
+    def fake_query(sym, cfg, progress=None):
+        calls.append(sym)
+        worker.cancel()
+        return f"res:{sym}"
+
+    monkeypatch.setattr(app_mod, "query_gemini", fake_query)
+    worker.run()
+    assert calls == ["A"]
+    assert finished == [True]
+
+
+def test_analysis_worker_continues_after_exception(monkeypatch, qapp):
+    calls = []
+    signals = app_mod.WorkerSignals()
+    signals.result.connect(lambda r: calls.append(("r", r)))
+    signals.finished.connect(lambda: calls.append(("f",)))
+
+    def fake_query(sym, cfg, progress=None):
+        if sym == "A":
+            raise RuntimeError("boom")
+        return app_mod.AnalysisResult(sym, "BUY", "ok", "body", True, "", "t")
+
+    monkeypatch.setattr(app_mod, "query_gemini", fake_query)
+    w = app_mod.AnalysisWorker(["A", "B"], {}, signals)
+    w.run()
+
+    results = {}
+    for item in calls:
+        if item[0] == "r":
+            results[item[1].symbol] = item[1]
+    assert results["A"].verdict == "ERROR" and "boom" in results["A"].error
+    assert results["B"].verdict == "BUY"
+    assert calls[-1] == ("f",)
+
+
+def test_finished_clears_status_and_syncs_details():
+    class FakeTray:
+        _on_finished = app_mod.TrayApp._on_finished
+
+        def __init__(self):
+            self.check_in_progress = True
+            self._active_thread = object()
+            self._check_status = {"HURA.TO": "receiving response"}
+            self._status_since = {"HURA.TO": datetime.now()}
+            self._check_started_at = datetime.now()
+            self.calls = []
+            self._rebuild_menu = lambda: self.calls.append("menu")
+            self._refresh_details_data = lambda: self.calls.append("data")
+            self._sync_details_status = lambda: self.calls.append("sync")
+
+    tray = FakeTray()
+    tray._on_finished()
+    assert tray.check_in_progress is False
+    assert tray._active_thread is None
+    assert tray._check_status == {}
+    assert tray._status_since == {}
+    assert tray._check_started_at is None
+    assert tray.calls == ["menu", "data", "sync"]
+
+
+def test_cancel_check_calls_worker_and_notifies():
+    class Worker:
+        def __init__(self):
+            self.cancelled = False
+
+        def cancel(self):
+            self.cancelled = True
+
+    class FakeTray:
+        cancel_check = app_mod.TrayApp.cancel_check
+
+        def __init__(self):
+            self.worker = Worker()
+            self._active_thread = self.worker
+            self.messages = []
+            self.tray = type(
+                "Tray",
+                (),
+                {"showMessage": lambda self, *a, **k: self.owner.messages.append(a)},
+            )()
+            self.tray.owner = self
+
+    tray = FakeTray()
+    tray.cancel_check()
+    assert tray.worker.cancelled is True
+    assert "Cancelling" in tray.messages[0][1]
+
+
+def test_watchdog_resets_even_if_worker_still_alive():
+    class FakeTray:
+        _check_watchdog = app_mod.TrayApp._check_watchdog
+
+        def __init__(self):
+            self.check_in_progress = True
+            self._active_thread = type("T", (), {"is_alive": lambda self: True})()
+            self._check_status = {"A": "pending"}
+            self._status_since = {"A": datetime.now()}
+            self._check_started_at = datetime.now()
+            self.calls = []
+            self._rebuild_menu = lambda: self.calls.append("menu")
+            self._refresh_details_data = lambda: self.calls.append("data")
+            self._sync_details_status = lambda: self.calls.append("sync")
+            self.messages = []
+            self.tray = type(
+                "Tray",
+                (),
+                {"showMessage": lambda self, *a, **k: self.owner.messages.append(a)},
+            )()
+            self.tray.owner = self
+
+    tray = FakeTray()
+    tray._check_watchdog()
+    assert tray.check_in_progress is False
+    assert tray._check_status == {}
+    assert tray._status_since == {}
+    assert tray._check_started_at is None
+    assert tray.calls == ["menu", "data", "sync"]
+    assert "still running" in tray.messages[0][1]
+
+
+def test_stale_check_generation_is_ignored():
+    class FakeTray:
+        _on_finished = app_mod.TrayApp._on_finished
+        _check_watchdog = app_mod.TrayApp._check_watchdog
+
+        def __init__(self):
+            self.check_in_progress = True
+            self._active_thread = object()
+            self._check_status = {"A": "pending"}
+            self._check_generation = 2
+            self.calls = []
+            self._sync_details_status = lambda: self.calls.append("sync")
+            self._rebuild_menu = lambda: self.calls.append("menu")
+            self._refresh_details_data = lambda: self.calls.append("data")
+
+    tray = FakeTray()
+    tray._on_finished(1)
+    tray._check_watchdog(1)
+    assert tray.check_in_progress is True
+    assert tray._check_status == {"A": "pending"}
+    assert tray.calls == []
+
+
 def test_main_no_tray(monkeypatch):
     # `main()` creates its own QApplication; pass a fake class that reuses the
     # existing Qt instance to avoid conflicting app lifecycles in pytest.
+    monkeypatch.setattr(app_mod, "setup_logging", lambda: None)
     existing = QApplication.instance()
 
     class FakeApp:

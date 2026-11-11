@@ -64,6 +64,15 @@ def test_load_config_handles_corrupt_json(monkeypatch, tmp_path):
     assert loaded["symbols"] == config.DEFAULT_CONFIG["symbols"]
 
 
+def test_load_config_handles_non_object_json(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config.config_dir()
+    config.config_path().write_text("[]", encoding="utf-8")
+    loaded = config.load_config()
+    assert loaded["symbols"] == config.DEFAULT_CONFIG["symbols"]
+    assert loaded["ai"]["command"] == config.DEFAULT_CONFIG["ai"]["command"]
+
+
 def test_load_config_merges_and_sanitizes(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     config.config_dir()
@@ -81,10 +90,30 @@ def test_load_config_merges_and_sanitizes(monkeypatch, tmp_path):
     assert loaded["last_results"] == {}
     assert loaded["notify_on"] == config.DEFAULT_CONFIG["notify_on"]
     assert loaded["check_on_startup"] == "due"
-    assert loaded["ai"]["command"] == config.DEFAULT_CONFIG["ai"]["command"]
+    assert loaded["ai"]["command"] == ["custom", "-p", "{prompt}"]
     assert loaded["ai"]["agy_fallback_models"] == config.DEFAULT_CONFIG["ai"]["agy_fallback_models"]
     assert loaded["ai"]["timeout_seconds"] == 7
-    assert loaded["gemini_command"] == "custom"
+    assert "gemini_command" not in loaded
+    assert "gemini_args" not in loaded
+
+
+def test_load_config_migrates_legacy_command(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config.config_dir()
+    config.config_path().write_text(
+        json.dumps({"gemini_command": "custom", "gemini_args": ["--prompt"]}),
+        encoding="utf-8",
+    )
+    loaded = config.load_config()
+    assert loaded["ai"]["command"] == ["custom", "--prompt", "{prompt}"]
+
+
+def test_save_config_uses_lock_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    cfg = config.json.loads(config.json.dumps(config.DEFAULT_CONFIG))
+    config.save_config(cfg)
+    assert config.config_path().with_suffix(".lock").exists()
+    assert config.load_config()["symbols"] == cfg["symbols"]
 
 
 def test_load_config_preserves_valid_startup_modes(monkeypatch, tmp_path):

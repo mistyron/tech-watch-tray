@@ -12,6 +12,19 @@ dependencies = [
   "PyQt6>=6.4",
 ]
 
+[project.optional-dependencies]
+screener = [
+  "numpy",
+  "pandas",
+  "requests",
+  "yfinance",
+  "lxml",
+]
+dev = [
+  "pytest",
+  "pytest-cov",
+]
+
 [project.scripts]
 tech-watch = "tech_watch.app:main"
 

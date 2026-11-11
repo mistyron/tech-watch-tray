@@ -1,6 +1,8 @@
 import subprocess
+import sys
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 import tech_watch.gemini as gemini
@@ -15,7 +17,10 @@ def test_resolve_command_uses_which(monkeypatch):
 def test_resolve_command_fallback_path(monkeypatch):
     monkeypatch.setattr(gemini.shutil, "which", lambda c: None)
     monkeypatch.setattr(gemini.subprocess.os.path, "exists", lambda p: True)
-    assert gemini._resolve_command("gemini") == "/home/ron_plasma/.npm-global/bin/gemini"
+    expected = gemini.subprocess.os.path.join(
+        gemini.subprocess.os.path.expanduser("~"), ".npm-global", "bin", "gemini"
+    )
+    assert gemini._resolve_command("gemini") == expected
 
 
 def test_reconcile_verdict_buy_wait_cues():
@@ -56,11 +61,10 @@ def test_command_argv_substitutes_and_resolves(monkeypatch):
     assert argv == ["/x/myai", "--sym", "AAPL", "hello"]
 
 
-def test_command_argv_legacy_and_missing_command(monkeypatch):
+def test_command_argv_missing_command(monkeypatch):
     monkeypatch.setattr(gemini, "_resolve_command", lambda c: f"/x/{c}")
-    argv = gemini._command_argv("A", "p", {"gemini_command": "g", "gemini_args": ["-p"]})
-    assert argv == ["/x/g", "-p", "p"]
-    assert gemini._command_argv("A", "p", {"ai": {"command": []}}) is not None  # falls to legacy
+    assert gemini._command_argv("A", "p", {"gemini_command": "g", "gemini_args": ["-p"]}) is None
+    assert gemini._command_argv("A", "p", {"ai": {"command": []}}) is None
 
 
 def test_is_agy_command_and_model_helpers():
@@ -85,6 +89,73 @@ def test_yf_symbol():
     assert gemini._yf_symbol("xic") == "XIC.TO"
     assert gemini._yf_symbol("BRK-B") == "BRK-B.TO"
     assert gemini._yf_symbol("") == ""
+
+
+def test_yf_symbol_candidates_tries_us_and_tsx():
+    assert gemini._yf_symbol_candidates("AAPL") == ["AAPL", "AAPL.TO"]
+    assert gemini._yf_symbol_candidates("$AAPL") == ["AAPL", "AAPL.TO"]
+    assert gemini._yf_symbol_candidates("XIC") == ["XIC", "XIC.TO"]
+    assert gemini._yf_symbol_candidates("XIC.TO") == ["XIC.TO"]
+    assert gemini._yf_symbol_candidates("BBD.B") == ["BBD-B", "BBD-B.TO", "BBD.B"]
+    assert gemini._yf_symbol_candidates("BBD.B.TO") == ["BBD-B.TO"]
+    assert gemini._yf_symbol_candidates("BRK.B") == ["BRK-B", "BRK-B.TO", "BRK.B"]
+    assert gemini._yf_symbol_candidates("BRK-B") == ["BRK-B", "BRK-B.TO"]
+    assert gemini._yf_symbol_candidates("^GSPC") == ["^GSPC"]
+    assert gemini._yf_symbol_candidates("EURUSD=X") == ["EURUSD=X"]
+    assert gemini._yf_symbol_candidates("") == []
+
+
+def test_fetch_live_snapshot_uses_adjusted_prices_and_candidates(monkeypatch):
+    calls = []
+    idx = pd.date_range("2024-01-01", periods=60, freq="B")
+    df = pd.DataFrame({"Close": range(1, 61), "Volume": [1_000_000] * 60}, index=idx)
+
+    def download(symbol, **kwargs):
+        calls.append((symbol, kwargs))
+        if symbol == "AAPL":
+            return pd.DataFrame()
+        return df
+
+    monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(download=download))
+    text, err = gemini.fetch_live_snapshot("AAPL")
+    assert err == ""
+    assert calls[0][0] == "AAPL"
+    assert calls[1][0] == "AAPL.TO"
+    assert all(kwargs["auto_adjust"] is True for _, kwargs in calls)
+    assert "AAPL.TO" in text
+
+
+def test_fetch_live_snapshot_retries_after_candidate_exception(monkeypatch):
+    calls = []
+    idx = pd.date_range("2024-01-01", periods=60, freq="B")
+    df = pd.DataFrame({"Close": range(1, 61), "Volume": [1_000_000] * 60}, index=idx)
+
+    def download(symbol, **kwargs):
+        calls.append(symbol)
+        if symbol == "AAPL":
+            raise RuntimeError("temporary failure")
+        return df
+
+    monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(download=download))
+    text, err = gemini.fetch_live_snapshot("AAPL")
+    assert err == ""
+    assert calls == ["AAPL", "AAPL.TO"]
+    assert "AAPL.TO" in text
+
+
+def test_fetch_live_snapshot_reports_all_candidates_failed(monkeypatch):
+    calls = []
+
+    def download(symbol, **kwargs):
+        calls.append(symbol)
+        return pd.DataFrame()
+
+    monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(download=download))
+    text, err = gemini.fetch_live_snapshot("AAPL")
+    assert text == ""
+    assert calls == ["AAPL", "AAPL.TO"]
+    assert "tried AAPL, AAPL.TO" in err
+    assert "Last error: AAPL.TO: no data" in err
 
 
 def test_fmt_num():
@@ -239,3 +310,120 @@ def test_query_gemini_ollama_fallback_on_quota(monkeypatch):
     fb = gemini.AnalysisResult("X", "WAIT", "fb", "t", True, "", "t")
     monkeypatch.setattr(gemini, "_ollama_fallback", lambda *a, **k: fb)
     assert gemini.query_gemini("X", {"query_template": "{symbol}"}) is fb
+
+
+def test_parse_analysis_markdown_bold():
+    text = "Analysis\n**Verdict:** WAIT\n**Summary:** Hold current shares"
+    assert gemini.parse_analysis("X", text) == ("WAIT", "Hold current shares")
+    text = "- **VERDICT: BUY**\n- **SUMMARY: Breakout confirmed**"
+    assert gemini.parse_analysis("X", text) == ("BUY", "Breakout confirmed")
+
+
+def test_parse_analysis_conditional_buy_is_wait():
+    assert gemini.parse_analysis("X", "You should buy only if it breaks above resistance")[0] == "WAIT"
+    assert gemini.parse_analysis("X", "Buy now, momentum is strong")[0] == "BUY"
+
+
+def test_is_unusable_analysis_requires_actionable_verdict():
+    assert gemini._is_unusable_analysis("Analysis " * 100, "UNKNOWN")
+    assert gemini._is_unusable_analysis("I don't have access to live market data\nVERDICT: BUY", "BUY")
+    assert not gemini._is_unusable_analysis(
+        "Based on the provided snapshot\nVERDICT: BUY\nSUMMARY: ok", "BUY"
+    )
+    assert not gemini._is_unusable_analysis("**VERDICT: BUY**\n**SUMMARY:** ok", "BUY")
+
+
+def test_command_argv_preserves_unresolved_args(monkeypatch):
+    monkeypatch.setattr(gemini, "_resolve_command", lambda c: None)
+    cfg = {"ai": {"command": ["missing", "--flag", "{prompt}"]}}
+    assert gemini._command_argv("X", "hi", cfg) == ["missing", "--flag", "hi"]
+
+
+def test_command_argv_handles_literal_braces(monkeypatch):
+    monkeypatch.setattr(gemini, "_resolve_command", lambda c: "/x/ai")
+    cfg = {"ai": {"command": ["ai", "{prompt}"]}}
+    assert gemini._command_argv("X", '{"a": 1}', cfg) == ["/x/ai", '{"a": 1}']
+
+
+def test_query_gemini_template_with_literal_braces(monkeypatch):
+    captured = {}
+
+    def fake_argv(symbol, prompt, cfg):
+        captured["prompt"] = prompt
+        return ["ai", prompt]
+
+    monkeypatch.setattr(gemini, "_command_argv", fake_argv)
+    monkeypatch.setattr(gemini, "_resolve_command", lambda c: "/bin/ai")
+    monkeypatch.setattr(gemini.shutil, "which", lambda c: "/bin/ai")
+    monkeypatch.setattr(
+        gemini,
+        "_run_analysis_command",
+        lambda *a, **k: (gemini.AnalysisResult("X", "BUY", "ok", "body", True, "", "t"), ""),
+    )
+    cfg = {"query_template": 'Analyze {"symbol": "{symbol}"}'}
+    res = gemini.query_gemini("X", cfg)
+    assert res.verdict == "BUY"
+    assert captured["prompt"] == 'Analyze {"symbol": "X"}'
+
+
+def test_query_gemini_falls_back_on_unusable(monkeypatch):
+    argv = ["gemini", "-p", "q"]
+    monkeypatch.setattr(gemini, "_command_argv", lambda *a, **k: list(argv))
+    monkeypatch.setattr(gemini, "_resolve_command", lambda c: f"/bin/{c}")
+    monkeypatch.setattr(gemini.shutil, "which", lambda c: f"/bin/{c}")
+    monkeypatch.setattr(
+        gemini, "_run_analysis_command", lambda *a, **k: (None, "unusable analysis: no verdict")
+    )
+    fb = gemini.AnalysisResult("X", "WAIT", "fb", "t", True, "", "t")
+    monkeypatch.setattr(gemini, "_ollama_fallback", lambda *a, **k: fb)
+    assert gemini.query_gemini("X", {"query_template": "{symbol}"}) is fb
+
+
+def test_query_gemini_agy_fallback_on_unusable(monkeypatch):
+    argv = ["agy", "--model", "bad", "-p", "q"]
+    monkeypatch.setattr(gemini, "_command_argv", lambda *a, **k: list(argv))
+    monkeypatch.setattr(gemini, "_resolve_command", lambda c: f"/bin/{c}")
+    monkeypatch.setattr(gemini.shutil, "which", lambda c: f"/bin/{c}")
+    calls = []
+
+    def run(argv, symbol, timeout, progress=None):
+        calls.append(argv[2] if "--model" in argv else None)
+        if argv[2] == "good":
+            return gemini.AnalysisResult(symbol, "BUY", "ok", "body", True, "", "t"), ""
+        return None, "unusable analysis: no verdict"
+
+    monkeypatch.setattr(gemini, "_run_analysis_command", run)
+    cfg = {"query_template": "{symbol}", "ai": {"agy_fallback_models": ["good"], "timeout_seconds": 5}}
+    res = gemini.query_gemini("X", cfg)
+    assert res.verdict == "BUY"
+    assert calls == ["bad", "good"]
+
+
+def test_ollama_fallback_rejects_unusable_output(monkeypatch):
+    monkeypatch.setattr(gemini, "_resolve_command", lambda c: "/bin/ollama")
+    monkeypatch.setattr(gemini.shutil, "which", lambda c: "/bin/ollama")
+    monkeypatch.setattr(gemini, "fetch_live_snapshot", lambda s: ("LIVE DATA", ""))
+    proc = SimpleNamespace(returncode=0, stdout="no verdict here", stderr="")
+    monkeypatch.setattr(gemini.subprocess, "run", lambda *a, **k: proc)
+    res = gemini._ollama_fallback("XIC.TO", "prompt", {"ai": {"ollama_model": "m"}}, "t", ["429 quota"])
+    assert res and not res.ok
+    assert "no usable verdict" in res.summary
+
+
+def test_query_gemini_end_to_end_markdown(monkeypatch):
+    proc = SimpleNamespace(
+        returncode=0, stdout="**Verdict:** BUY\n**Summary:** Breakout confirmed", stderr=""
+    )
+    monkeypatch.setattr(gemini.subprocess, "run", lambda *a, **k: proc)
+    monkeypatch.setattr(gemini, "_resolve_command", lambda c: "/bin/ai")
+    monkeypatch.setattr(gemini.shutil, "which", lambda c: "/bin/ai")
+    cfg = {"query_template": "Analyze {symbol}", "ai": {"command": ["ai", "{prompt}"]}}
+    res = gemini.query_gemini("X", cfg)
+    assert res.verdict == "BUY"
+    assert res.summary == "Breakout confirmed"
+
+
+def test_error_classifiers():
+    assert gemini._is_refusal_error("I can't access real-time data")
+    assert gemini._is_timeout_error("agy: timed out after 5s")
+    assert gemini._is_unusable_error("unusable analysis: no verdict")
