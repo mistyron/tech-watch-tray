@@ -1,3 +1,4 @@
+import logging
 import os
 from datetime import datetime, timedelta
 
@@ -36,6 +37,15 @@ def test_fmt_elapsed():
     assert app_mod._fmt_elapsed(now - timedelta(hours=2, minutes=5), now) == "2h 05m"
 
 
+def test_watchdog_delay_accounts_for_fallbacks():
+    cfg = {"ai": {"timeout_seconds": 10, "ollama_timeout_seconds": 20, "agy_fallback_models": ["a", "b"]}}
+    per_symbol_ms = (10 * 3 + 20 + 60) * 1000
+    assert app_mod._watchdog_delay_ms(cfg, 1) == per_symbol_ms
+    assert app_mod._watchdog_delay_ms(cfg, 3) == per_symbol_ms * 3
+    assert app_mod._watchdog_delay_ms({}, 1) == 420_000
+    assert app_mod._watchdog_delay_ms({"ai": {"timeout_seconds": "bad"}}, 1) == 420_000
+
+
 def test_details_dialog_shows_elapsed_status(qapp):
     dlg = app_mod.DetailsDialog({"symbols": ["HURA.TO"], "last_results": {}})
     started = datetime.now() - timedelta(seconds=75)
@@ -43,8 +53,8 @@ def test_details_dialog_shows_elapsed_status(qapp):
         {"HURA.TO": "receiving response from agy [model]"},
         {"HURA.TO": started},
     )
-    assert dlg.overview_table.item(0, 1).text().startswith("UPDATING 1m")
-    assert "receiving response" in dlg.overview_table.item(0, 3).text()
+    assert dlg.overview_table.item(0, 2).text().startswith("UPDATING 1m")
+    assert "receiving response" in dlg.overview_table.item(0, 4).text()
     assert "1m" in dlg.status_label.text()
     dlg._status_timer.stop()
     dlg.close()
@@ -58,9 +68,10 @@ def test_details_dialog_only_ticks_active_status(qapp):
         {"A.TO": started, "B.TO": started},
     )
     dlg._tick_status()
-    assert dlg.overview_table.item(0, 1).text().startswith("UPDATING 1m")
-    assert dlg.overview_table.item(1, 1).text() == "PENDING"
-    assert dlg.overview_table.item(1, 3).text() == "Queued for update…"
+    assert dlg.overview_table.item(0, 2).text().startswith("UPDATING 1m")
+    assert dlg.overview_table.item(1, 2).text() == "PENDING"
+    assert dlg.overview_table.item(1, 4).text() == "Queued for update…"
+    assert dlg.overview_table.cellWidget(0, 0).text() == ""
     assert "A.TO" in dlg.status_label.text()
     assert "B.TO" not in dlg.status_label.text()
 
@@ -71,6 +82,133 @@ def test_details_dialog_only_ticks_active_status(qapp):
     assert not dlg._status_timer.isActive()
     assert "waiting for next security" in dlg.status_label.text()
     dlg.close()
+
+
+def test_details_dialog_check_button_invokes_callback(qapp):
+    checked = []
+    callback = checked.append
+    dlg = app_mod.DetailsDialog(
+        {"symbols": ["A.TO", "B.TO"], "last_results": {}},
+        None,
+        None,
+        callback,
+    )
+    assert dlg._on_check_symbol is callback
+    btn = dlg.overview_table.cellWidget(1, 0)
+    assert btn is not None
+    assert btn.text() == ""
+    assert not btn.icon().isNull()
+    btn.click()
+    assert checked == ["B.TO"]
+    dlg.close()
+
+
+def test_details_dialog_disables_check_button_while_symbol_check_running(qapp):
+    checked = []
+    dlg = app_mod.DetailsDialog(
+        {"symbols": ["A.TO", "B.TO"], "last_results": {}},
+        None,
+        None,
+        checked.append,
+    )
+    dlg.set_check_status({"A.TO": "receiving response"}, {"A.TO": datetime.now()})
+    btn_a = dlg.overview_table.cellWidget(0, 0)
+    btn_b = dlg.overview_table.cellWidget(1, 0)
+    assert not btn_a.isEnabled()
+    assert btn_b.isEnabled()
+    assert "already in progress" in btn_a.toolTip()
+    btn_a.click()
+    assert checked == []
+
+    dlg.set_check_status({}, {})
+    assert dlg.overview_table.cellWidget(0, 0).isEnabled()
+    dlg.close()
+
+
+def test_details_dialog_check_button_without_callback_is_safe(qapp):
+    dlg = app_mod.DetailsDialog({"symbols": ["A.TO"], "last_results": {}})
+    assert dlg._on_check_symbol is None
+    dlg.overview_table.cellWidget(0, 0).click()
+    dlg.close()
+
+
+def test_show_details_wires_single_symbol_check(qapp, monkeypatch):
+    monkeypatch.setattr(app_mod, "load_config", lambda: {"symbols": ["A.TO"], "last_results": {}})
+
+    class FakeTray:
+        show_details = app_mod.TrayApp.show_details
+
+        def __init__(self):
+            self._details_dialog = None
+            self._check_status = {}
+            self._status_since = {}
+
+        def check_single_symbol(self, symbol):
+            pass
+
+        def _details_closed(self):
+            self._details_dialog = None
+
+    tray = FakeTray()
+    tray.show_details("A.TO")
+    dlg = tray._details_dialog
+    assert dlg is not None
+    assert dlg._on_check_symbol == tray.check_single_symbol
+    dlg.close()
+
+
+def test_details_dialog_overview_double_click_opens_symbol(qapp):
+    dlg = app_mod.DetailsDialog({"symbols": ["A.TO", "B.TO"], "last_results": {}})
+    dlg._open_symbol_from_overview(1, 1)
+    assert dlg.symbol_box.currentText() == "B.TO"
+    assert dlg.tabs.currentIndex() == 1
+    tabs = dlg.detail_tabs.count()
+    assert tabs == 2
+    dlg.close()
+
+
+def test_details_dialog_summary_column_sized_to_contents(qapp):
+    dlg = app_mod.DetailsDialog({"symbols": ["A.TO"], "last_results": {}})
+    header = dlg.overview_table.horizontalHeader()
+    for col in range(dlg.overview_table.columnCount()):
+        assert header.sectionResizeMode(col) == app_mod.QHeaderView.ResizeMode.ResizeToContents
+    dlg.close()
+
+
+def test_check_single_symbol_starts_busy_indicator(qapp, monkeypatch):
+    class FakeWorker:
+        def __init__(self, symbols, cfg, signals):
+            self.symbols = symbols
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(app_mod, "AnalysisWorker", FakeWorker)
+    monkeypatch.setattr(app_mod.QTimer, "singleShot", staticmethod(lambda *a, **k: None))
+
+    class FakeTray:
+        check_single_symbol = app_mod.TrayApp.check_single_symbol
+
+        def __init__(self):
+            self.check_in_progress = False
+            self.cfg = {"symbols": ["A.TO"], "last_results": {}}
+            self._check_generation = 0
+            self._check_status = {}
+            self._status_since = {}
+            self._check_started_at = None
+            self.calls = []
+            self._update_tray_state = lambda: self.calls.append("tray")
+            self._rebuild_menu = lambda: self.calls.append("menu")
+            self._start_busy_indicator = lambda: self.calls.append("busy")
+            self._sync_details_status = lambda: None
+            self._refresh_details_data = lambda: None
+            self.tray = type("T", (), {"showMessage": lambda self, *a, **k: None})()
+
+    tray = FakeTray()
+    tray.check_single_symbol("A.TO")
+    assert tray.check_in_progress is True
+    assert tray._check_status == {"A.TO": "pending"}
+    assert tray.calls == ["tray", "menu", "busy"]
 
 
 def test_on_progress_resets_timer_for_next_symbol():
@@ -136,7 +274,6 @@ def test_tray_menu_keeps_expected_actions(qapp):
             self.check_in_progress = False
             self.cfg = {"symbols": ["XIC.TO"], "last_results": {}}
             self.app = FakeApp()
-            self._results = lambda: {}
             self._update_tray_state = lambda: None
             self.run_daily_check = lambda: None
             self.cancel_check = lambda: None
@@ -144,20 +281,18 @@ def test_tray_menu_keeps_expected_actions(qapp):
             self.show_settings = lambda: None
             self.show_screener = lambda: None
             self.show_config_location = lambda: None
-            self.show_details = lambda symbol=None: None
 
     tray = FakeTray()
     tray._rebuild_menu()
     texts = [a.text() for a in tray.menu.actions() if not a.isSeparator()]
-    assert texts[:5] == [
+    assert texts == [
         "Check all now",
         "Manage securities...",
         "Settings...",
         "TSX Screener...",
         "Open config file location",
+        "Quit",
     ]
-    assert any(t.startswith("XIC.TO:") for t in texts)
-    assert "Quit" in texts
 
     tray.check_in_progress = True
     tray._rebuild_menu()

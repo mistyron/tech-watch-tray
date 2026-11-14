@@ -4,10 +4,10 @@ import signal
 import sys
 import threading
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
-from PyQt6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QBrush, QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PyQt6.QtCore import QObject, QPointF, QRectF, QSize, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QAction, QBrush, QColor, QIcon, QDesktopServices, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QStyle,
     QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
@@ -67,6 +68,18 @@ def _fmt_elapsed(started_at: datetime | None, now: datetime | None = None) -> st
         return f"{minutes}m {seconds:02d}s"
     hours, minutes = divmod(minutes, 60)
     return f"{hours}h {minutes:02d}m"
+
+
+def _watchdog_delay_ms(cfg: dict[str, Any], symbol_count: int) -> int:
+    ai = cfg.get("ai") if isinstance(cfg.get("ai"), dict) else {}
+    try:
+        timeout = int(ai.get("timeout_seconds") or 180)
+        ollama_timeout = int(ai.get("ollama_timeout_seconds") or 180)
+    except (TypeError, ValueError):
+        timeout, ollama_timeout = 180, 180
+    models = ai.get("agy_fallback_models") if isinstance(ai.get("agy_fallback_models"), list) else []
+    per_symbol = max(60, timeout * (1 + len(models)) + ollama_timeout + 60)
+    return max(30_000, max(1, symbol_count) * per_symbol * 1000)
 
 
 def _tray_icon_pixmap(state: str, size: int = 64) -> QPixmap:
@@ -307,19 +320,24 @@ class ManageSymbolsDialog(QDialog):
 
 
 class DetailsDialog(QDialog):
-    def __init__(self, cfg: dict[str, Any], current_symbol: str | None = None, parent: QWidget | None = None):
+    def __init__(self, cfg: dict[str, Any], current_symbol: str | None = None, parent: QWidget | None = None,
+                 on_check_symbol: Callable[[str], None] | None = None):
         super().__init__(parent)
         self.setWindowIcon(_tray_icon("idle"))
         self.cfg = cfg
+        self._on_check_symbol = on_check_symbol
         self.check_status: dict[str, str] = {}
         self._status_since: dict[str, datetime] = {}
+        self._check_icon = QIcon.fromTheme("view-refresh")
+        if self._check_icon.isNull():
+            self._check_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload)
         self.setWindowTitle("Tech Watch Tray - Details")
         self.resize(940, 660)
         layout = QVBoxLayout(self)
 
         self.tabs = QTabWidget()
-        self.overview_table = QTableWidget(0, 4)
-        self.overview_table.setHorizontalHeaderLabels(["Symbol", "Verdict", "Checked", "Summary"])
+        self.overview_table = QTableWidget(0, 5)
+        self.overview_table.setHorizontalHeaderLabels(["Check", "Symbol", "Verdict", "Checked", "Summary"])
         self.overview_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.overview_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.overview_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
@@ -333,6 +351,7 @@ class DetailsDialog(QDialog):
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         self.overview_table.cellDoubleClicked.connect(self._open_symbol_from_overview)
         self.tabs.addTab(self.overview_table, "Overview")
 
@@ -458,8 +477,8 @@ class DetailsDialog(QDialog):
                 break
             if symbol not in active:
                 continue
-            verdict_item = self.overview_table.item(row, 1)
-            summary_item = self.overview_table.item(row, 3)
+            verdict_item = self.overview_table.item(row, 2)
+            summary_item = self.overview_table.item(row, 4)
             if verdict_item is not None:
                 verdict_item.setText(self._updating_label(symbol))
             if summary_item is not None:
@@ -505,6 +524,21 @@ class DetailsDialog(QDialog):
                 summary = str(status) or "Check in progress…"
             row = self.overview_table.rowCount()
             self.overview_table.insertRow(row)
+            check_btn = QPushButton()
+            check_btn.setFixedSize(26, 26)
+            check_btn.setIcon(self._check_icon)
+            check_btn.setIconSize(QSize(16, 16))
+            check_btn.setFlat(True)
+            check_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            check_btn.setEnabled(status is None)
+            check_btn.setToolTip(
+                f"Check technicals for {symbol}"
+                if status is None
+                else f"Check already in progress for {symbol}"
+            )
+            check_btn.clicked.connect(lambda _checked=False, s=symbol: self._check_symbol(s))
+            self.overview_table.setCellWidget(row, 0, check_btn)
+            # Set symbol verdict and other data in columns 1-4
             values = [symbol, verdict, checked, summary]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
@@ -518,7 +552,7 @@ class DetailsDialog(QDialog):
                     item.setForeground(QColor(61, 174, 233))
                 elif col == 1 and verdict.upper() == "PENDING":
                     item.setForeground(Qt.GlobalColor.gray)
-                if status and col in (0, 1):
+                if status and col in (1, 2):  # symbol and verdict columns
                     font = item.font()
                     font.setItalic(True)
                     item.setFont(font)
@@ -530,10 +564,17 @@ class DetailsDialog(QDialog):
                     )
                 if col == 3 and summary:
                     item.setToolTip(summary)
-                self.overview_table.setItem(row, col, item)
+                # Column index shifted by 1 due to Check column
+                self.overview_table.setItem(row, col + 1, item)
+
+    def _check_symbol(self, symbol: str) -> None:
+        if symbol in self.check_status:
+            return
+        if self._on_check_symbol is not None:
+            self._on_check_symbol(symbol)
 
     def _open_symbol_from_overview(self, row: int, _col: int) -> None:
-        item = self.overview_table.item(row, 0)
+        item = self.overview_table.item(row, 1)
         if not item:
             return
         symbol = item.text().strip().upper()
@@ -983,31 +1024,69 @@ class TrayApp(QObject):
 
         self.menu.addSeparator()
 
-        results = self._results()
-        symbols = self.cfg.get("symbols", [])
-        if not symbols:
-            empty = QAction("No securities configured", self.menu)
-            empty.setEnabled(False)
-            self.menu.addAction(empty)
-        for symbol in symbols:
-            data = results.get(symbol) or {}
-            verdict = str(data.get("verdict") or "—")
-            checked = _fmt_time(data.get("checked_at"))
-            summary = str(data.get("summary") or "")
-            label = f"{symbol}: {verdict} ({checked})"
-            act = QAction(label, self.menu)
-            act.triggered.connect(lambda _=False, s=symbol: self.show_details(s))
-            if summary:
-                act.setToolTip(summary)
-            self.menu.addAction(act)
-
-        self.menu.addSeparator()
-
         quit_act = QAction("Quit", self.menu)
         quit_act.triggered.connect(self.app.quit)
         self.menu.addAction(quit_act)
 
         self._update_tray_state()
+
+    def check_single_symbol(self, symbol: str) -> None:
+        if self.check_in_progress:
+            log.info("Skipping single symbol check for %s: a check is already in progress", symbol)
+            self.tray.showMessage(
+                "Tech Watch Tray",
+                "A check is already in progress. Please wait for it to finish.",
+                QSystemTrayIcon.MessageIcon.Warning,
+                5000,
+            )
+            return
+        symbols = [str(s).strip().upper() for s in self.cfg.get("symbols", []) if str(s).strip()]
+        if not symbols:
+            self.tray.showMessage(
+                "Tech Watch Tray",
+                "No securities configured. Use 'Manage securities...' to add symbols.",
+                QSystemTrayIcon.MessageIcon.Information,
+                8000,
+            )
+            return
+        if symbol not in symbols:
+            self.tray.showMessage(
+                "Tech Watch Tray",
+                f"Symbol {symbol} is not in the configured securities list.",
+                QSystemTrayIcon.MessageIcon.Warning,
+                5000,
+            )
+            return
+        log.info("Starting single symbol check for %s", symbol)
+        self.check_in_progress = True
+        self._check_started_at = datetime.now()
+        self._check_generation += 1
+        generation = self._check_generation
+        self._check_status = {symbol: "pending"}
+        self._status_since = {symbol: self._check_started_at}
+        self._update_tray_state()
+        self._rebuild_menu()
+        self._start_busy_indicator()
+        log.info("Starting check for %s", symbol)
+        self.tray.showMessage(
+            "Tech Watch Tray",
+            f"Checking technicals for: {symbol}",
+            QSystemTrayIcon.MessageIcon.Information,
+            5000,
+        )
+        signals = WorkerSignals()
+        signals.progress.connect(lambda s, st, g=generation: self._on_progress(s, st, g))
+        signals.result.connect(lambda r, g=generation: self._on_result(r, g))
+        signals.finished.connect(lambda g=generation: self._on_finished(g))
+        thread = AnalysisWorker([symbol], self.cfg, signals)
+        self._active_thread = thread
+        self._sync_details_status()
+        self._refresh_details_data()
+        thread.start()
+        QTimer.singleShot(
+            _watchdog_delay_ms(self.cfg, 1),
+            lambda g=generation: self._check_watchdog(g),
+        )
 
     def _checking_tooltip(self) -> str:
         elapsed = _fmt_elapsed(self._check_started_at)
@@ -1273,7 +1352,7 @@ class TrayApp(QObject):
             dlg.raise_()
             dlg.activateWindow()
             return
-        dlg = DetailsDialog(self.cfg, symbol, None)
+        dlg = DetailsDialog(self.cfg, symbol, None, self.check_single_symbol)
         dlg.set_check_status(self._check_status, self._status_since)
         self._details_dialog = dlg
         dlg.finished.connect(self._details_closed)
