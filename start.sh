@@ -184,7 +184,10 @@ install_desktop_entry() {
     local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
     local apps_dir="$data_home/applications"
     local icon_root="$data_home/icons/hicolor"
-    local size src
+    local size src exec_args=""
+    if [[ "$APP_MODE" == "container" ]]; then
+        exec_args=" --container-app"
+    fi
     mkdir -p "$apps_dir"
     for size in 16 24 32 48 64 128 256; do
         src="$ROOT/tech_watch/resources/tech-watch-$size.png"
@@ -196,7 +199,7 @@ install_desktop_entry() {
 Type=Application
 Name=Tech Watch Tray
 Comment=Daily AI technicals monitor for securities
-Exec="$ROOT/start.sh"
+Exec="$ROOT/start.sh"$exec_args
 Icon=tech-watch
 Terminal=false
 Categories=Utility;Finance;
