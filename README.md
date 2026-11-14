@@ -62,7 +62,7 @@ Important config fields:
 
 ## Troubleshooting
 
-Logs are written to `$XDG_DATA_HOME/tech-watch/tech-watch.log` (usually `~/.local/share/tech-watch/tech-watch.log`) and rotate at 1 MB with three backups.
+Logs are written to stdout and to `$XDG_DATA_HOME/tech-watch/tech-watch.log` (usually `~/.local/share/tech-watch/tech-watch.log`); the file rotates at 1 MB with three backups. Set `TECH_WATCH_LOG_LEVEL` (e.g. `DEBUG`) to change verbosity.
 
 ### `IneligibleTierError` / "Gemini Code Assist for individuals ... migrate to Antigravity"
 
@@ -79,6 +79,10 @@ Fix options:
 
 ## Autostart on Plasma login (optional)
 
+`start.sh` installs `~/.local/share/applications/io.github.mistyron.TechWatchTray.desktop`
+and the application icons on launch, so Wayland task managers can associate the
+open dialog windows with the Tech Watch icon.
+
 Create `~/.config/autostart/tech-watch.desktop`:
 
 ```ini
@@ -87,9 +91,11 @@ Type=Application
 Name=Tech Watch Tray
 Comment=Daily AI technicals monitor for securities
 Exec=/usr/bin/python3 /opt/src/tech-watch/tech-watch.py
+Icon=tech-watch
 X-KDE-autostart-after=panel
 Terminal=false
 Categories=Utility;Finance;
+StartupWMClass=io.github.mistyron.TechWatchTray
 ```
 
 Adjust `Exec` if you move the project.

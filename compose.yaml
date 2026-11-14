@@ -1,0 +1,66 @@
+services:
+  app:
+    build:
+      context: .
+      args:
+        UID: ${TECH_WATCH_UID:-1000}
+        GID: ${TECH_WATCH_GID:-1000}
+        INSTALL_AGY: ${TECH_WATCH_INSTALL_AGY:-1}
+    image: tech-watch:local
+    init: true
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      TECH_WATCH_UID: ${TECH_WATCH_UID:-1000}
+      TECH_WATCH_GID: ${TECH_WATCH_GID:-1000}
+      DISPLAY: ${DISPLAY:-}
+      WAYLAND_DISPLAY: ${WAYLAND_DISPLAY:-}
+      XDG_SESSION_TYPE: ${XDG_SESSION_TYPE:-}
+      XDG_CURRENT_DESKTOP: ${XDG_CURRENT_DESKTOP:-KDE}
+      XDG_SESSION_DESKTOP: ${XDG_SESSION_DESKTOP:-plasma}
+      DESKTOP_SESSION: ${DESKTOP_SESSION:-plasma}
+      KDE_FULL_SESSION: ${KDE_FULL_SESSION:-true}
+      KDE_SESSION_VERSION: ${KDE_SESSION_VERSION:-6}
+      XDG_RUNTIME_DIR: ${TECH_WATCH_RUNTIME_DIR:-/tmp/tech-watch-runtime}
+      DBUS_SESSION_BUS_ADDRESS: ${DBUS_SESSION_BUS_ADDRESS:-}
+      QT_QPA_PLATFORMTHEME: ${QT_QPA_PLATFORMTHEME:-}
+      XAUTHORITY: /tmp/.Xauthority
+      XDG_CONFIG_HOME: /config
+      XDG_DATA_HOME: /data
+      XDG_CACHE_HOME: /cache
+      OLLAMA_HOST: ${TECH_WATCH_OLLAMA_HOST:-http://ollama:11434}
+      TECH_WATCH_LOG_LEVEL: ${TECH_WATCH_LOG_LEVEL:-INFO}
+      TECH_WATCH_QT_PLATFORM: ${TECH_WATCH_QT_PLATFORM:-}
+      QT_QPA_PLATFORM: ${QT_QPA_PLATFORM:-}
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:ro
+      - ${TECH_WATCH_RUNTIME_DIR:-/tmp/tech-watch-runtime}:${TECH_WATCH_RUNTIME_DIR:-/tmp/tech-watch-runtime}
+      - ${TECH_WATCH_XAUTHORITY:-/dev/null}:/tmp/.Xauthority:ro
+      - tech_watch_config:/config
+      - tech_watch_data:/data
+      - ${TECH_WATCH_CONFIG_DIR:-./.docker/config/tech-watch}:/config/tech-watch
+      - ${TECH_WATCH_KDE_GLOBALS:-/dev/null}:/config/kdeglobals:ro
+      - ${TECH_WATCH_DATA_DIR:-./.docker/data/tech-watch}:/data/tech-watch
+      - tech_watch_home:/home/techwatch
+      - /etc/localtime:/etc/localtime:ro
+    extra_hosts:
+      - host.docker.internal:host-gateway
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+volumes:
+  ollama_models:
+  tech_watch_config:
+  tech_watch_data:
+  tech_watch_home:

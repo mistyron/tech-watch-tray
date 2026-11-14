@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+COMPOSE_FILE="$ROOT/compose.yaml"
+
+if docker compose version >/dev/null 2>&1; then
+    COMPOSE=(docker compose -p tech-watch -f "$COMPOSE_FILE")
+elif command -v docker-compose >/dev/null 2>&1; then
+    COMPOSE=(docker-compose -p tech-watch -f "$COMPOSE_FILE")
+else
+    echo "docker compose is not available" >&2
+    exit 127
+fi
+
+if ! "${COMPOSE[@]}" ps -q ollama 2>/dev/null | grep -q .; then
+    echo "Ollama container is not running. Start it with: $ROOT/start.sh" >&2
+    exit 1
+fi
+
+exec "${COMPOSE[@]}" exec -T ollama ollama "$@"
