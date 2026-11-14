@@ -626,6 +626,36 @@ def test_stale_result_is_logged(caplog):
     assert "Ignoring stale result for A" in caplog.text
 
 
+def test_main_sets_wayland_desktop_file_name(qapp, monkeypatch):
+    calls = {}
+
+    class FakeApp:
+        def __init__(self, argv):
+            pass
+
+        def setQuitOnLastWindowClosed(self, value):
+            calls["quit_on_last_window"] = value
+
+        def setApplicationName(self, value):
+            calls["app_name"] = value
+
+        def setOrganizationName(self, value):
+            calls["org_name"] = value
+
+        def setDesktopFileName(self, value):
+            calls["desktop_file"] = value
+
+        def setWindowIcon(self, value):
+            calls["icon"] = value
+
+    monkeypatch.setattr(app_mod, "setup_logging", lambda: None)
+    monkeypatch.setattr(app_mod, "QApplication", FakeApp)
+    monkeypatch.setattr(app_mod.QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: False))
+    monkeypatch.setattr(app_mod.QMessageBox, "critical", staticmethod(lambda *a, **k: None))
+    assert app_mod.main(["prog"]) == 1
+    assert calls["desktop_file"] == app_mod.APP_ID
+
+
 def test_main_no_tray(monkeypatch):
     # `main()` creates its own QApplication; pass a fake class that reuses the
     # existing Qt instance to avoid conflicting app lifecycles in pytest.

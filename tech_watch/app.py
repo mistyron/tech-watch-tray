@@ -46,6 +46,8 @@ from .logging_setup import log_path, setup_logging
 
 log = logging.getLogger(__name__)
 
+APP_ID = "io.github.mistyron.TechWatchTray"
+
 
 def _fmt_time(ts: str | None) -> str:
     if not ts:
@@ -1442,6 +1444,7 @@ def main(argv: list[str] | None = None) -> int:
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("Tech Watch Tray")
     app.setOrganizationName("Tech Watch Tray")
+    app.setDesktopFileName(APP_ID)
     app.setWindowIcon(_tray_icon("idle"))
 
     if not QSystemTrayIcon.isSystemTrayAvailable():
