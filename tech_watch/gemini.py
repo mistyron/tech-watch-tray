@@ -729,6 +729,6 @@ def query_gemini(symbol: str, cfg: dict[str, Any], timeout: int | None = None, p
     last = attempts[-1][1] if attempts else "AI command failed"
     friendly = _friendly_error(last)
     detail = "Tried:\n" + "\n".join(f"- {a}: {_friendly_error(e)[:180]}" for a, e in attempts)
-    log.warning("AI check failed for %s: %s", symbol, friendly)
+    log.debug("AI check failed for %s: %s", symbol, friendly)
     return AnalysisResult(symbol, "ERROR", friendly[:240], detail, False, friendly, checked_at)
 

@@ -370,6 +370,21 @@ def test_analysis_worker_emits(monkeypatch, qapp):
     assert any(c[0] == "p" and c[1] == "B" and c[2] == "pending" for c in calls)
 
 
+def test_analysis_worker_logs_each_result(monkeypatch, qapp, caplog):
+    signals = app_mod.WorkerSignals()
+
+    def fake_query(sym, cfg, progress=None):
+        if sym == "A":
+            return app_mod.AnalysisResult(sym, "ERROR", "boom", "", False, "boom", "t")
+        return app_mod.AnalysisResult(sym, "BUY", "ok", "body", True, "", "t")
+
+    monkeypatch.setattr(app_mod, "query_gemini", fake_query)
+    with caplog.at_level(logging.INFO, logger="tech_watch.app"):
+        app_mod.AnalysisWorker(["A", "B"], {}, signals).run()
+    assert "Check failed for A: boom" in caplog.text
+    assert "Check completed for B: BUY" in caplog.text
+
+
 def test_screener_worker_success(monkeypatch, qapp):
     signals = app_mod.ScreenerSignals()
     out = {}
@@ -532,12 +547,23 @@ def test_cancel_check_calls_worker_and_notifies():
 
 
 def test_watchdog_resets_even_if_worker_still_alive():
+    class Worker:
+        def __init__(self):
+            self.cancelled = False
+
+        def is_alive(self):
+            return True
+
+        def cancel(self):
+            self.cancelled = True
+
     class FakeTray:
         _check_watchdog = app_mod.TrayApp._check_watchdog
 
         def __init__(self):
             self.check_in_progress = True
-            self._active_thread = type("T", (), {"is_alive": lambda self: True})()
+            self.worker = Worker()
+            self._active_thread = self.worker
             self._check_status = {"A": "pending"}
             self._status_since = {"A": datetime.now()}
             self._check_started_at = datetime.now()
@@ -559,6 +585,7 @@ def test_watchdog_resets_even_if_worker_still_alive():
     assert tray._check_status == {}
     assert tray._status_since == {}
     assert tray._check_started_at is None
+    assert tray.worker.cancelled is True
     assert tray.calls == ["menu", "data", "sync"]
     assert "still running" in tray.messages[0][1]
 
@@ -584,6 +611,19 @@ def test_stale_check_generation_is_ignored():
     assert tray.check_in_progress is True
     assert tray._check_status == {"A": "pending"}
     assert tray.calls == []
+
+
+def test_stale_result_is_logged(caplog):
+    class FakeTray:
+        _on_result = app_mod.TrayApp._on_result
+
+        def __init__(self):
+            self._check_generation = 2
+
+    result = app_mod.AnalysisResult("A", "ERROR", "boom", "", False, "boom", "t")
+    with caplog.at_level(logging.INFO, logger="tech_watch.app"):
+        FakeTray()._on_result(result, 1)
+    assert "Ignoring stale result for A" in caplog.text
 
 
 def test_main_no_tray(monkeypatch):

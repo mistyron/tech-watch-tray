@@ -42,7 +42,7 @@ from PyQt6.QtWidgets import (
 
 from .config import config_path, load_config, save_config
 from .gemini import AnalysisResult, query_gemini
-from .logging_setup import setup_logging
+from .logging_setup import log_path, setup_logging
 
 log = logging.getLogger(__name__)
 
@@ -204,6 +204,15 @@ class AnalysisWorker(threading.Thread):
                         str(e),
                         checked_at,
                     )
+                if isinstance(result, AnalysisResult):
+                    if result.ok:
+                        log.info("Check completed for %s: %s", symbol, result.verdict)
+                    else:
+                        log.warning(
+                            "Check failed for %s: %s",
+                            symbol,
+                            result.summary or result.error or result.verdict or "unknown error",
+                        )
                 self.signals.progress.emit(symbol, "formatting reply")
                 self.signals.result.emit(result)
                 for pending in self.symbols[i + 1 :]:
@@ -1210,13 +1219,8 @@ class TrayApp(QObject):
         thread.start()
         self._schedule_next_check()
         # Failsafe: don't leave UI stuck if a worker misbehaves (includes agy model retries + Ollama fallback).
-        ai = self.cfg.get("ai") if isinstance(self.cfg.get("ai"), dict) else {}
-        t = int(ai.get("timeout_seconds") or 180)
-        ot = int(ai.get("ollama_timeout_seconds") or 180)
-        models = ai.get("agy_fallback_models") if isinstance(ai.get("agy_fallback_models"), list) else []
-        per_symbol = max(60, t * (1 + len(models)) + ot + 60)
         QTimer.singleShot(
-            max(30_000, len(symbols) * per_symbol * 1000),
+            _watchdog_delay_ms(self.cfg, len(symbols)),
             lambda g=generation: self._check_watchdog(g),
         )
 
@@ -1244,6 +1248,12 @@ class TrayApp(QObject):
 
     def _on_result(self, result_obj: object, generation: int | None = None) -> None:
         if generation is not None and generation != self._check_generation:
+            log.info(
+                "Ignoring stale result for %s from check generation %s (current %s)",
+                getattr(result_obj, "symbol", "?"),
+                generation,
+                self._check_generation,
+            )
             return
         if not isinstance(result_obj, AnalysisResult):
             return
@@ -1303,6 +1313,9 @@ class TrayApp(QObject):
             return
         t = self._active_thread
         alive = t is not None and t.is_alive()
+        if alive and hasattr(t, "cancel"):
+            t.cancel()
+            log.warning("Cancelling stalled check worker after watchdog timeout")
         self.check_in_progress = False
         self._active_thread = None
         self._check_status = {}
@@ -1312,7 +1325,7 @@ class TrayApp(QObject):
         self._refresh_details_data()
         self._sync_details_status()
         msg = (
-            "Check state was reset after a stalled check (worker is still running)."
+            "Check state was reset after a stalled check (worker is still running; cancellation requested)."
             if alive
             else "Check state was reset after a stalled check."
         )
@@ -1407,6 +1420,19 @@ class TrayApp(QObject):
         dlg.show()
         dlg.raise_()
         dlg.activateWindow()
+
+    def show_log_location(self) -> None:
+        path = log_path()
+        log.info("Opening log file %s", path)
+        if path.exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+            return
+        self.tray.showMessage(
+            "Tech Watch Tray log",
+            f"Log file will appear at {path}",
+            QSystemTrayIcon.MessageIcon.Information,
+            10000,
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
