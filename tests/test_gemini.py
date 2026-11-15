@@ -1,5 +1,7 @@
+import signal
 import subprocess
 import sys
+import threading
 from types import SimpleNamespace
 
 import pandas as pd
@@ -198,9 +200,51 @@ def test_is_unusable_analysis():
     assert not gemini._is_unusable_analysis(good, "BUY")
 
 
+def test_run_command_uses_new_session(monkeypatch):
+    seen = {}
+
+    class Proc:
+        pid = 1
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return "VERDICT: BUY\nSUMMARY: up", ""
+
+    def popen(argv, **kwargs):
+        seen.update(kwargs)
+        return Proc()
+
+    monkeypatch.setattr(gemini.subprocess, "Popen", popen)
+    proc = gemini._run_command(["gemini"], 10)
+    assert proc.stdout == "VERDICT: BUY\nSUMMARY: up"
+    assert seen["start_new_session"] is True
+
+
+def test_run_command_cancel_kills_process_group(monkeypatch):
+    cancel = threading.Event()
+    killed = []
+
+    class Proc:
+        pid = 4321
+        returncode = None
+
+        def communicate(self, timeout=None):
+            cancel.set()
+            raise subprocess.TimeoutExpired("x", timeout)
+
+        def kill(self):
+            killed.append("kill")
+
+    monkeypatch.setattr(gemini.subprocess, "Popen", lambda *a, **k: Proc())
+    monkeypatch.setattr(gemini.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+    with pytest.raises(gemini.AnalysisCancelled):
+        gemini._run_command(["gemini"], 10, cancel)
+    assert (4321, signal.SIGKILL) in killed
+
+
 def test_run_analysis_command_success(monkeypatch):
-    proc = SimpleNamespace(returncode=0, stdout="VERDICT: BUY\nSUMMARY: up", stderr="")
-    monkeypatch.setattr(gemini.subprocess, "run", lambda *a, **k: proc)
+    proc = subprocess.CompletedProcess(["gemini"], 0, "VERDICT: BUY\nSUMMARY: up", "")
+    monkeypatch.setattr(gemini, "_run_command", lambda *a, **k: proc)
     events = []
     result, err = gemini._run_analysis_command(["gemini"], "X", 10, progress=lambda d, s: events.append((d, s)))
     assert err == ""
@@ -212,15 +256,15 @@ def test_run_analysis_command_timeout(monkeypatch):
     def boom(*a, **k):
         raise subprocess.TimeoutExpired(cmd="x", timeout=1)
 
-    monkeypatch.setattr(gemini.subprocess, "run", boom)
+    monkeypatch.setattr(gemini, "_run_command", boom)
     result, err = gemini._run_analysis_command(["gemini"], "X", 1)
     assert result is None
     assert "timed out" in err
 
 
 def test_run_analysis_command_unusable(monkeypatch):
-    proc = SimpleNamespace(returncode=0, stdout="I don't have access to live market data", stderr="")
-    monkeypatch.setattr(gemini.subprocess, "run", lambda *a, **k: proc)
+    proc = subprocess.CompletedProcess(["agy"], 0, "I don't have access to live market data", "")
+    monkeypatch.setattr(gemini, "_run_command", lambda *a, **k: proc)
     result, err = gemini._run_analysis_command(["agy"], "X", 10)
     assert result is None
     assert err
@@ -239,8 +283,8 @@ def test_ollama_fallback_success(monkeypatch):
     monkeypatch.setattr(gemini, "_resolve_command", lambda c: "/bin/ollama")
     monkeypatch.setattr(gemini.shutil, "which", lambda c: "/bin/ollama")
     monkeypatch.setattr(gemini, "fetch_live_snapshot", lambda s: ("LIVE DATA", ""))
-    proc = SimpleNamespace(returncode=0, stdout="VERDICT: WAIT\nSUMMARY: mixed", stderr="")
-    monkeypatch.setattr(gemini.subprocess, "run", lambda *a, **k: proc)
+    proc = subprocess.CompletedProcess(["ollama"], 0, "VERDICT: WAIT\nSUMMARY: mixed", "")
+    monkeypatch.setattr(gemini, "_run_command", lambda *a, **k: proc)
     res = gemini._ollama_fallback("XIC.TO", "prompt", {"ai": {"ollama_model": "m"}}, "t", ["429 quota"])
     assert res and res.verdict == "WAIT" and res.ok
     assert "Yahoo Finance snapshot" in res.full_text
@@ -289,7 +333,7 @@ def test_query_gemini_agy_fallback_chain(monkeypatch):
     monkeypatch.setattr(gemini.shutil, "which", lambda c: f"/bin/{c}")
     calls = []
 
-    def run(argv, symbol, timeout, progress=None):
+    def run(argv, symbol, timeout, progress=None, cancel=None):
         calls.append(argv[2] if "--model" in argv else None)
         if argv[2] == "good":
             return gemini.AnalysisResult(symbol, "BUY", "ok", "body", True, "", "t"), ""
@@ -397,7 +441,7 @@ def test_query_gemini_agy_fallback_on_unusable(monkeypatch):
     monkeypatch.setattr(gemini.shutil, "which", lambda c: f"/bin/{c}")
     calls = []
 
-    def run(argv, symbol, timeout, progress=None):
+    def run(argv, symbol, timeout, progress=None, cancel=None):
         calls.append(argv[2] if "--model" in argv else None)
         if argv[2] == "good":
             return gemini.AnalysisResult(symbol, "BUY", "ok", "body", True, "", "t"), ""
@@ -414,18 +458,16 @@ def test_ollama_fallback_rejects_unusable_output(monkeypatch):
     monkeypatch.setattr(gemini, "_resolve_command", lambda c: "/bin/ollama")
     monkeypatch.setattr(gemini.shutil, "which", lambda c: "/bin/ollama")
     monkeypatch.setattr(gemini, "fetch_live_snapshot", lambda s: ("LIVE DATA", ""))
-    proc = SimpleNamespace(returncode=0, stdout="no verdict here", stderr="")
-    monkeypatch.setattr(gemini.subprocess, "run", lambda *a, **k: proc)
+    proc = subprocess.CompletedProcess(["ollama"], 0, "no verdict here", "")
+    monkeypatch.setattr(gemini, "_run_command", lambda *a, **k: proc)
     res = gemini._ollama_fallback("XIC.TO", "prompt", {"ai": {"ollama_model": "m"}}, "t", ["429 quota"])
     assert res and not res.ok
     assert "no usable verdict" in res.summary
 
 
 def test_query_gemini_end_to_end_markdown(monkeypatch):
-    proc = SimpleNamespace(
-        returncode=0, stdout="**Verdict:** BUY\n**Summary:** Breakout confirmed", stderr=""
-    )
-    monkeypatch.setattr(gemini.subprocess, "run", lambda *a, **k: proc)
+    proc = subprocess.CompletedProcess(["ai"], 0, "**Verdict:** BUY\n**Summary:** Breakout confirmed", "")
+    monkeypatch.setattr(gemini, "_run_command", lambda *a, **k: proc)
     monkeypatch.setattr(gemini, "_resolve_command", lambda c: "/bin/ai")
     monkeypatch.setattr(gemini.shutil, "which", lambda c: "/bin/ai")
     cfg = {"query_template": "Analyze {symbol}", "ai": {"command": ["ai", "{prompt}"]}}

@@ -64,6 +64,14 @@ def config_path() -> Path:
     return config_dir() / "config.json"
 
 
+def coerce_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return max(minimum, min(maximum, number))
+
+
 def _backup_invalid_config(path: Path) -> None:
     try:
         path.replace(path.with_suffix(".bak"))
@@ -97,20 +105,17 @@ def load_config() -> dict[str, Any]:
         merged["symbols"] = DEFAULT_CONFIG["symbols"][:]
     if not isinstance(merged.get("last_results"), dict):
         merged["last_results"] = {}
+    else:
+        merged["last_results"] = {
+            str(k): v for k, v in merged["last_results"].items() if isinstance(v, dict)
+        }
     if not isinstance(merged.get("notify_on"), list):
         merged["notify_on"] = DEFAULT_CONFIG["notify_on"][:]
     mode = str(merged.get("check_on_startup") or "due").strip().lower()
     merged["check_on_startup"] = mode if mode in {"due", "always", "never"} else "due"
-    raw_interval = merged.get("check_interval_hours")
-    try:
-        interval = int(DEFAULT_CONFIG["check_interval_hours"] if raw_interval in (None, "") else raw_interval)
-    except (TypeError, ValueError):
-        log.warning("Invalid check_interval_hours %r; using default", raw_interval)
-        interval = DEFAULT_CONFIG["check_interval_hours"]
-    if not 1 <= interval <= 168:
-        log.warning("check_interval_hours %s is out of range; clamping to 1-168", interval)
-        interval = max(1, min(168, interval))
-    merged["check_interval_hours"] = interval
+    merged["check_interval_hours"] = coerce_int(
+        merged.get("check_interval_hours"), DEFAULT_CONFIG["check_interval_hours"], 1, 168
+    )
     if not isinstance(user_ai.get("command"), list) or not user_ai.get("command"):
         legacy_cmd = data.get("gemini_command")
         legacy_args = data.get("gemini_args")
@@ -126,8 +131,11 @@ def load_config() -> dict[str, Any]:
             merged["ai"]["command"] = DEFAULT_CONFIG["ai"]["command"][:]
     merged.pop("gemini_command", None)
     merged.pop("gemini_args", None)
-    if not isinstance(merged.get("ai", {}).get("agy_fallback_models"), list):
-        merged.setdefault("ai", {})["agy_fallback_models"] = DEFAULT_CONFIG["ai"]["agy_fallback_models"][:]
+    ai = merged["ai"]
+    ai["timeout_seconds"] = coerce_int(ai.get("timeout_seconds"), 180, 10, 3600)
+    ai["ollama_timeout_seconds"] = coerce_int(ai.get("ollama_timeout_seconds"), 180, 10, 3600)
+    if not isinstance(ai.get("agy_fallback_models"), list):
+        ai["agy_fallback_models"] = DEFAULT_CONFIG["ai"]["agy_fallback_models"][:]
     return merged
 
 

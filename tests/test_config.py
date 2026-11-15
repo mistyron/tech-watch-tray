@@ -68,10 +68,32 @@ def test_load_config_handles_corrupt_json(monkeypatch, tmp_path):
 def test_load_config_coerces_interval(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     config.config_dir()
-    cases = [("24h", 24), (0, 1), (999, 168), (6, 6)]
+    cases = [("24h", 24), (0, 1), (999, 168), (6, 6), (float("inf"), 24)]
     for value, expected in cases:
         config.config_path().write_text(json.dumps({"check_interval_hours": value}), encoding="utf-8")
         assert config.load_config()["check_interval_hours"] == expected
+
+
+def test_load_config_coerces_ai_timeouts(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config.config_dir()
+    config.config_path().write_text(
+        json.dumps({"ai": {"timeout_seconds": "2m", "ollama_timeout_seconds": 99999}}),
+        encoding="utf-8",
+    )
+    loaded = config.load_config()
+    assert loaded["ai"]["timeout_seconds"] == 180
+    assert loaded["ai"]["ollama_timeout_seconds"] == 3600
+
+
+def test_load_config_drops_non_object_results(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config.config_dir()
+    config.config_path().write_text(
+        json.dumps({"last_results": {"AAPL": "BUY", "MSFT": {"verdict": "WAIT"}}}),
+        encoding="utf-8",
+    )
+    assert config.load_config()["last_results"] == {"MSFT": {"verdict": "WAIT"}}
 
 
 def test_load_config_handles_non_object_json(monkeypatch, tmp_path):
@@ -102,7 +124,7 @@ def test_load_config_merges_and_sanitizes(monkeypatch, tmp_path):
     assert loaded["check_on_startup"] == "due"
     assert loaded["ai"]["command"] == ["custom", "-p", "{prompt}"]
     assert loaded["ai"]["agy_fallback_models"] == config.DEFAULT_CONFIG["ai"]["agy_fallback_models"]
-    assert loaded["ai"]["timeout_seconds"] == 7
+    assert loaded["ai"]["timeout_seconds"] == 10
     assert "gemini_command" not in loaded
     assert "gemini_args" not in loaded
 

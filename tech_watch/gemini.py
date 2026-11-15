@@ -1,17 +1,24 @@
 import logging
 import math
+import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 from .agy_auth import is_auth_error
-from .config import DEFAULT_CONFIG
+from .config import DEFAULT_CONFIG, coerce_int
 
 log = logging.getLogger(__name__)
+
+
+class AnalysisCancelled(Exception):
+    pass
 
 
 @dataclass
@@ -490,7 +497,10 @@ def _ollama_fallback(
     checked_at: str,
     prior_errors: list[str] | str,
     progress: Any = None,
+    cancel: Any = None,
 ) -> AnalysisResult | None:
+    if cancel is not None and cancel.is_set():
+        raise AnalysisCancelled
     ai = cfg.get("ai") if isinstance(cfg.get("ai"), dict) else {}
     if not ai.get("fallback_on_quota", True):
         return None
@@ -509,10 +519,7 @@ def _ollama_fallback(
     resolved = _resolve_command(cmd) or shutil.which(cmd)
     if not resolved:
         return None
-    try:
-        ot = int(ai.get("ollama_timeout_seconds") or 180)
-    except Exception:
-        ot = 180
+    ot = coerce_int(ai.get("ollama_timeout_seconds"), 180, 10, 3600)
 
     if progress:
         try:
@@ -520,6 +527,8 @@ def _ollama_fallback(
         except Exception:
             pass
     snapshot, snap_err = fetch_live_snapshot(symbol)
+    if cancel is not None and cancel.is_set():
+        raise AnalysisCancelled
     prior_text = "\n".join(f"- {_friendly_error(e)[:220]}" for e in errs[-6:])
     if snap_err:
         note = f"Prior AI attempts failed:\n{prior_text}\nOllama fallback skipped: {snap_err}"
@@ -542,10 +551,12 @@ def _ollama_fallback(
         except Exception:
             pass
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=ot, env={**subprocess.os.environ})
+        proc = _run_command(argv, ot, cancel)
     except subprocess.TimeoutExpired:
         note = f"Prior AI attempts failed:\n{prior_text}\nOllama fallback ({model}) timed out after {ot}s."
         return AnalysisResult(symbol, "ERROR", f"Ollama fallback timed out ({model})", note, False, note, checked_at)
+    except AnalysisCancelled:
+        raise
     except Exception as e:
         note = f"Prior AI attempts failed:\n{prior_text}\nOllama fallback failed: {e}"
         return AnalysisResult(symbol, "ERROR", f"Ollama fallback failed: {e}", note, False, note, checked_at)
@@ -609,11 +620,51 @@ def _model_label(argv: list[str]) -> str:
     return subprocess.os.path.basename(str(argv[0])) if argv else "AI"
 
 
+def _stop_process(proc: subprocess.Popen) -> None:
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except OSError:
+        pass
+    try:
+        proc.communicate(timeout=1)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def _run_command(argv: list[str], timeout: int, cancel: Any = None) -> subprocess.CompletedProcess:
+    if cancel is not None and cancel.is_set():
+        raise AnalysisCancelled
+    proc = subprocess.Popen(
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={**os.environ},
+        start_new_session=os.name == "posix",
+    )
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            out, err = proc.communicate(timeout=0.1)
+            return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+        except subprocess.TimeoutExpired:
+            if cancel is not None and cancel.is_set():
+                _stop_process(proc)
+                raise AnalysisCancelled from None
+            if time.monotonic() >= deadline:
+                _stop_process(proc)
+                raise subprocess.TimeoutExpired(argv, timeout) from None
+
+
 def _run_analysis_command(
     argv: list[str],
     symbol: str,
     timeout: int,
     progress: Any = None,
+    cancel: Any = None,
 ) -> tuple[AnalysisResult | None, str]:
     label = _model_label(argv)
     if progress:
@@ -622,9 +673,11 @@ def _run_analysis_command(
         except Exception:
             pass
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env={**subprocess.os.environ})
+        proc = _run_command(argv, timeout, cancel)
     except subprocess.TimeoutExpired:
         return None, f"{label}: timed out after {timeout}s"
+    except AnalysisCancelled:
+        raise
     except Exception as e:
         return None, f"{label}: {e}"
     if progress:
@@ -673,29 +726,34 @@ def _agy_fallback_models(argv: list[str], cfg: dict[str, Any]) -> list[str]:
     return out
 
 
-def query_gemini(symbol: str, cfg: dict[str, Any], timeout: int | None = None, progress: Any = None) -> AnalysisResult:
+def query_gemini(
+    symbol: str,
+    cfg: dict[str, Any],
+    timeout: int | None = None,
+    progress: Any = None,
+    cancel: Any = None,
+) -> AnalysisResult:
+    if cancel is not None and cancel.is_set():
+        raise AnalysisCancelled
     checked_at = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
     template = str(cfg.get("query_template") or "")
     prompt = template.replace("{symbol}", symbol)
     ai = cfg.get("ai") if isinstance(cfg.get("ai"), dict) else {}
     if timeout is None:
-        try:
-            timeout = int(ai.get("timeout_seconds") or 180)
-        except Exception:
-            timeout = 180
+        timeout = coerce_int(ai.get("timeout_seconds"), 180, 10, 3600)
     argv = _command_argv(symbol, prompt, cfg)
     if not argv:
         return AnalysisResult(symbol, "ERROR", "No AI command configured", "", False, "Missing ai.command", checked_at)
     if not _resolve_command(argv[0]) and not shutil.which(argv[0]):
         cmd_str = shlex.join(argv)
         primary_error = f"Could not find `{argv[0]}`. Configure `ai.command` in ~/.config/tech-watch/config.json."
-        fb = _ollama_fallback(symbol, prompt, cfg, checked_at, [primary_error], progress=progress)
+        fb = _ollama_fallback(symbol, prompt, cfg, checked_at, [primary_error], progress=progress, cancel=cancel)
         if fb:
             return fb
         return AnalysisResult(symbol=symbol, verdict="ERROR", summary="AI command not found", full_text=cmd_str, ok=False, error=primary_error, checked_at=checked_at)
 
     attempts: list[tuple[str, str]] = []  # (label, error)
-    result, err = _run_analysis_command(argv, symbol, timeout, progress=progress)
+    result, err = _run_analysis_command(argv, symbol, timeout, progress=progress, cancel=cancel)
     if result:
         return result
     label = shlex.join(argv[:3]) + (" ..." if len(argv) > 3 else "")
@@ -716,7 +774,7 @@ def query_gemini(symbol: str, cfg: dict[str, Any], timeout: int | None = None, p
                 except Exception:
                     pass
             model_argv = _with_agy_model(argv, model)
-            result, merr = _run_analysis_command(model_argv, symbol, timeout, progress=progress)
+            result, merr = _run_analysis_command(model_argv, symbol, timeout, progress=progress, cancel=cancel)
             if result:
                 result.full_text = (
                     f"[Fallback within agy: succeeded with model {model} after prior quota/error]\n"
@@ -726,7 +784,7 @@ def query_gemini(symbol: str, cfg: dict[str, Any], timeout: int | None = None, p
             attempts.append((f"agy [{model}]", merr))
 
     prior_errors = [f"{a}: {e}" for a, e in attempts]
-    fb = _ollama_fallback(symbol, prompt, cfg, checked_at, prior_errors, progress=progress)
+    fb = _ollama_fallback(symbol, prompt, cfg, checked_at, prior_errors, progress=progress, cancel=cancel)
     if fb:
         return fb
     last = attempts[-1][1] if attempts else "AI command failed"

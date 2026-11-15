@@ -40,8 +40,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .config import config_path, load_config, save_config
-from .gemini import AnalysisResult, query_gemini
+from .config import coerce_int, config_path, load_config, save_config
+from .gemini import AnalysisCancelled, AnalysisResult, query_gemini
 from .logging_setup import log_path, setup_logging
 
 log = logging.getLogger(__name__)
@@ -74,14 +74,11 @@ def _fmt_elapsed(started_at: datetime | None, now: datetime | None = None) -> st
 
 def _watchdog_delay_ms(cfg: dict[str, Any], symbol_count: int) -> int:
     ai = cfg.get("ai") if isinstance(cfg.get("ai"), dict) else {}
-    try:
-        timeout = int(ai.get("timeout_seconds") or 180)
-        ollama_timeout = int(ai.get("ollama_timeout_seconds") or 180)
-    except (TypeError, ValueError):
-        timeout, ollama_timeout = 180, 180
+    timeout = coerce_int(ai.get("timeout_seconds"), 180, 10, 3600)
+    ollama_timeout = coerce_int(ai.get("ollama_timeout_seconds"), 180, 10, 3600)
     models = ai.get("agy_fallback_models") if isinstance(ai.get("agy_fallback_models"), list) else []
     per_symbol = max(60, timeout * (1 + len(models)) + ollama_timeout + 60)
-    return max(30_000, max(1, symbol_count) * per_symbol * 1000)
+    return min(86_400_000, max(30_000, max(1, symbol_count) * per_symbol * 1000))
 
 
 def _tray_icon_pixmap(state: str, size: int = 64) -> QPixmap:
@@ -194,7 +191,9 @@ class AnalysisWorker(threading.Thread):
                     break
                 self.signals.progress.emit(symbol, "preparing check")
                 try:
-                    result = query_gemini(symbol, self.cfg, progress=progress)
+                    result = query_gemini(symbol, self.cfg, progress=progress, cancel=self._cancel)
+                except AnalysisCancelled:
+                    break
                 except Exception as e:
                     checked_at = datetime.now().astimezone().isoformat(timespec="seconds")
                     result = AnalysisResult(
@@ -215,6 +214,8 @@ class AnalysisWorker(threading.Thread):
                             symbol,
                             result.summary or result.error or result.verdict or "unknown error",
                         )
+                if self._cancel.is_set():
+                    break
                 self.signals.progress.emit(symbol, "formatting reply")
                 self.signals.result.emit(result)
                 for pending in self.symbols[i + 1 :]:
@@ -641,7 +642,7 @@ class SettingsDialog(QDialog):
         gform.addRow("Symbols (comma-separated):", self.symbols_edit)
         self.interval = QSpinBox()
         self.interval.setRange(1, 168)
-        self.interval.setValue(max(1, int(cfg.get("check_interval_hours") or 24)))
+        self.interval.setValue(coerce_int(cfg.get("check_interval_hours"), 24, 1, 168))
         gform.addRow("Check interval (hours):", self.interval)
         self.startup_mode = QComboBox()
         self.startup_mode.addItem("Only when due (recommended)", "due")
@@ -670,7 +671,7 @@ class SettingsDialog(QDialog):
         aform.addRow("Primary command:", self.ai_command)
         self.ai_timeout = QSpinBox()
         self.ai_timeout.setRange(10, 3600)
-        self.ai_timeout.setValue(max(10, int(ai_cfg.get("timeout_seconds") or 180)))
+        self.ai_timeout.setValue(coerce_int(ai_cfg.get("timeout_seconds"), 180, 10, 3600))
         aform.addRow("Primary timeout (s):", self.ai_timeout)
         agy_models = ai_cfg.get("agy_fallback_models") if isinstance(ai_cfg.get("agy_fallback_models"), list) else []
         self.agy_models = QLineEdit(", ".join(str(m).strip() for m in agy_models if str(m).strip()))
@@ -685,7 +686,7 @@ class SettingsDialog(QDialog):
         aform.addRow("Ollama model:", self.ollama_model)
         self.ollama_timeout = QSpinBox()
         self.ollama_timeout.setRange(10, 3600)
-        self.ollama_timeout.setValue(max(10, int(ai_cfg.get("ollama_timeout_seconds") or 180)))
+        self.ollama_timeout.setValue(coerce_int(ai_cfg.get("ollama_timeout_seconds"), 180, 10, 3600))
         aform.addRow("Ollama timeout (s):", self.ollama_timeout)
         layout.addWidget(ai)
 
@@ -1314,6 +1315,7 @@ class TrayApp(QObject):
         if alive and hasattr(t, "cancel"):
             t.cancel()
             log.warning("Cancelling stalled check worker after watchdog timeout")
+        self._check_generation += 1
         self.check_in_progress = False
         self._active_thread = None
         self._check_status = {}
@@ -1335,7 +1337,7 @@ class TrayApp(QObject):
             t.cancel()
             self.tray.showMessage(
                 "Tech Watch Tray",
-                "Cancelling after the current symbol finishes.",
+                "Cancelling the current check…",
                 QSystemTrayIcon.MessageIcon.Information,
                 5000,
             )

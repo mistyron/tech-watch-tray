@@ -46,6 +46,13 @@ def test_watchdog_delay_accounts_for_fallbacks():
     assert app_mod._watchdog_delay_ms({"ai": {"timeout_seconds": "bad"}}, 1) == 420_000
 
 
+def test_settings_dialog_tolerates_bad_timeouts(qapp):
+    dlg = app_mod.SettingsDialog({"ai": {"timeout_seconds": "2m", "ollama_timeout_seconds": 99999}})
+    assert dlg.ai_timeout.value() == 180
+    assert dlg.ollama_timeout.value() == 3600
+    dlg.close()
+
+
 def test_details_dialog_shows_elapsed_status(qapp):
     dlg = app_mod.DetailsDialog({"symbols": ["HURA.TO"], "last_results": {}})
     started = datetime.now() - timedelta(seconds=75)
@@ -362,7 +369,7 @@ def test_analysis_worker_emits(monkeypatch, qapp):
     signals.result.connect(lambda r: calls.append(("r", r)))
     signals.finished.connect(lambda: calls.append(("f",)))
 
-    monkeypatch.setattr(app_mod, "query_gemini", lambda sym, cfg, progress=None: f"res:{sym}")
+    monkeypatch.setattr(app_mod, "query_gemini", lambda sym, cfg, progress=None, cancel=None: f"res:{sym}")
     w = app_mod.AnalysisWorker(["A", "B"], {"x": 1}, signals)
     w.run()
     assert ("r", "res:A") in calls and ("r", "res:B") in calls
@@ -373,7 +380,7 @@ def test_analysis_worker_emits(monkeypatch, qapp):
 def test_analysis_worker_logs_each_result(monkeypatch, qapp, caplog):
     signals = app_mod.WorkerSignals()
 
-    def fake_query(sym, cfg, progress=None):
+    def fake_query(sym, cfg, progress=None, cancel=None):
         if sym == "A":
             return app_mod.AnalysisResult(sym, "ERROR", "boom", "", False, "boom", "t")
         return app_mod.AnalysisResult(sym, "BUY", "ok", "body", True, "", "t")
@@ -458,7 +465,7 @@ def test_analysis_worker_cancel_stops_before_next_symbol(monkeypatch, qapp):
     signals.finished.connect(lambda: finished.append(True))
     worker = app_mod.AnalysisWorker(["A", "B"], {}, signals)
 
-    def fake_query(sym, cfg, progress=None):
+    def fake_query(sym, cfg, progress=None, cancel=None):
         calls.append(sym)
         worker.cancel()
         return f"res:{sym}"
@@ -469,13 +476,29 @@ def test_analysis_worker_cancel_stops_before_next_symbol(monkeypatch, qapp):
     assert finished == [True]
 
 
+def test_analysis_worker_stops_when_command_is_cancelled(monkeypatch, qapp):
+    signals = app_mod.WorkerSignals()
+    results = []
+    finished = []
+    signals.result.connect(lambda r: results.append(r))
+    signals.finished.connect(lambda: finished.append(True))
+
+    def fake_query(sym, cfg, progress=None, cancel=None):
+        raise app_mod.AnalysisCancelled
+
+    monkeypatch.setattr(app_mod, "query_gemini", fake_query)
+    app_mod.AnalysisWorker(["A", "B"], {}, signals).run()
+    assert results == []
+    assert finished == [True]
+
+
 def test_analysis_worker_continues_after_exception(monkeypatch, qapp):
     calls = []
     signals = app_mod.WorkerSignals()
     signals.result.connect(lambda r: calls.append(("r", r)))
     signals.finished.connect(lambda: calls.append(("f",)))
 
-    def fake_query(sym, cfg, progress=None):
+    def fake_query(sym, cfg, progress=None, cancel=None):
         if sym == "A":
             raise RuntimeError("boom")
         return app_mod.AnalysisResult(sym, "BUY", "ok", "body", True, "", "t")
@@ -564,6 +587,7 @@ def test_watchdog_resets_even_if_worker_still_alive():
             self.check_in_progress = True
             self.worker = Worker()
             self._active_thread = self.worker
+            self._check_generation = 0
             self._check_status = {"A": "pending"}
             self._status_since = {"A": datetime.now()}
             self._check_started_at = datetime.now()
@@ -585,6 +609,7 @@ def test_watchdog_resets_even_if_worker_still_alive():
     assert tray._check_status == {}
     assert tray._status_since == {}
     assert tray._check_started_at is None
+    assert tray._check_generation == 1
     assert tray.worker.cancelled is True
     assert tray.calls == ["menu", "data", "sync"]
     assert "still running" in tray.messages[0][1]
