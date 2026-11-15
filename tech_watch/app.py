@@ -1260,9 +1260,6 @@ class TrayApp(QObject):
         if not isinstance(result_obj, AnalysisResult):
             return
         results = self._results()
-        prev = results.get(result_obj.symbol) or {}
-        prev_verdict = str(prev.get("verdict") or "")
-        prev_checked = str(prev.get("checked_at") or "")
         results[result_obj.symbol] = result_obj.to_dict()
         self.cfg["last_results"] = results
         self._check_status.pop(result_obj.symbol, None)
@@ -1275,9 +1272,8 @@ class TrayApp(QObject):
         notify_on = {str(v).upper() for v in (self.cfg.get("notify_on") or ["BUY"])}
         verdict = (result_obj.verdict or "").upper()
         notify_key = f"{result_obj.symbol}:{verdict}:{result_obj.checked_at[:10]}"
-        changed_to_alert = verdict in notify_on and (prev_verdict.upper() != verdict or not prev_checked)
         first_alert = verdict in notify_on and self._last_notified.get(result_obj.symbol) != notify_key
-        if result_obj.ok and changed_to_alert and first_alert:
+        if result_obj.ok and first_alert:
             self._last_notified[result_obj.symbol] = notify_key
             self.tray.showMessage(
                 f"Tech Watch Tray: {result_obj.symbol}",

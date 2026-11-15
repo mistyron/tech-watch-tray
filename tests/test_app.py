@@ -626,6 +626,52 @@ def test_stale_result_is_logged(caplog):
     assert "Ignoring stale result for A" in caplog.text
 
 
+def test_notification_repeats_for_same_verdict_on_new_day():
+    class Tray:
+        def __init__(self, owner):
+            self.owner = owner
+
+        def showMessage(self, *args):
+            self.owner.messages.append(args)
+
+    class FakeTray:
+        _on_result = app_mod.TrayApp._on_result
+
+        def __init__(self):
+            self.cfg = {"last_results": {}, "notify_on": ["BUY"]}
+            self._check_status = {}
+            self._status_since = {}
+            self._last_notified = {}
+            self.messages = []
+            self.tray = Tray(self)
+
+        def _results(self):
+            return self.cfg["last_results"]
+
+        def _save(self):
+            pass
+
+        def _rebuild_menu(self):
+            pass
+
+        def _refresh_details_data(self):
+            pass
+
+        def _sync_details_status(self):
+            pass
+
+    tray = FakeTray()
+
+    def result(day):
+        return app_mod.AnalysisResult("AAPL", "BUY", "up", "", True, "", f"2024-05-{day}T12:00:00+00:00")
+
+    tray._on_result(result(6))
+    tray._on_result(result(6))
+    tray._on_result(result(7))
+    assert len(tray.messages) == 2
+    assert "AAPL" in tray.messages[0][0]
+
+
 def test_main_sets_wayland_desktop_file_name(qapp, monkeypatch):
     calls = {}
 
