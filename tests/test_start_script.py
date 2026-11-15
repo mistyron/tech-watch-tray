@@ -39,3 +39,11 @@ def test_start_script_installs_matching_desktop_entry():
     assert app_mod.APP_ID in script
     assert "$APP_ID.desktop" in script
     assert "StartupWMClass=$APP_ID" in script
+
+
+def test_start_script_shows_frameless_splash():
+    script = (ROOT / "start.sh").read_text(encoding="utf-8")
+    splash = (ROOT / "scripts" / "startup_splash.py").read_text(encoding="utf-8")
+    assert "startup_splash.py" in script
+    assert "FramelessWindowHint" in splash
+    assert "setFixedSize" in splash

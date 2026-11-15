@@ -180,6 +180,41 @@ compose_cmd() {
     fi
 }
 
+STARTUP_DIALOG=0
+STARTUP_DIALOG_PID=""
+STARTUP_DIALOG_STATUS=""
+
+start_startup_dialog() {
+    # Only when launched without a terminal (e.g. from the K-Menu).
+    [[ ! -t 2 ]] || return 0
+    [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] || return 0
+    local py="" icon="$ROOT/tech_watch/resources/tech-watch-256.png"
+    if [[ -x "$VENV_DIR/bin/python" ]] && "$VENV_DIR/bin/python" -c 'import PyQt6' >/dev/null 2>&1; then
+        py="$VENV_DIR/bin/python"
+    elif "$PYTHON_BIN" -c 'import PyQt6' >/dev/null 2>&1; then
+        py="$PYTHON_BIN"
+    fi
+    [[ -n "$py" ]] || return 0
+    STARTUP_DIALOG_STATUS="$(mktemp "${TMPDIR:-/tmp}/tech-watch-startup.XXXXXX")" || return 0
+    printf '%s\n' "Starting Tech Watch..." >"$STARTUP_DIALOG_STATUS"
+    "$py" "$ROOT/scripts/startup_splash.py" "$icon" "$STARTUP_DIALOG_STATUS" &
+    STARTUP_DIALOG_PID=$!
+    STARTUP_DIALOG=1
+}
+
+startup_status() {
+    [[ "$STARTUP_DIALOG" == 1 ]] || return 0
+    printf '%s\n' "$1" >"$STARTUP_DIALOG_STATUS"
+}
+
+stop_startup_dialog() {
+    [[ "$STARTUP_DIALOG" == 1 ]] || return 0
+    STARTUP_DIALOG=0
+    kill "$STARTUP_DIALOG_PID" 2>/dev/null || true
+    wait "$STARTUP_DIALOG_PID" 2>/dev/null || true
+    rm -f "$STARTUP_DIALOG_STATUS"
+}
+
 install_desktop_entry() {
     local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
     local apps_dir="$data_home/applications"
@@ -223,14 +258,21 @@ if [[ "$DOWN" == 1 ]]; then
     exit 0
 fi
 
+if [[ "$SMOKE" == 0 ]]; then
+    start_startup_dialog
+    trap stop_startup_dialog EXIT
+fi
+
 if [[ "$APP_MODE" == "container" ]]; then
     PY="$PYTHON_BIN"
 elif [[ "$INSTALL" == 1 ]]; then
     if [[ ! -x "$VENV_DIR/bin/python" ]]; then
+        startup_status "Preparing the Python environment..."
         echo "Creating virtualenv at $VENV_DIR..."
         "$PYTHON_BIN" -m venv "$VENV_DIR"
     fi
     if ! "$VENV_DIR/bin/python" -c "import PyQt6, pandas, yfinance" >/dev/null 2>&1; then
+        startup_status "Installing Python dependencies..."
         echo "Installing Python dependencies..."
         (
             cd "$ROOT"
@@ -292,6 +334,7 @@ if [[ "$MODE" == container ]]; then
     fi
 
     echo "Starting Ollama container..."
+    startup_status "Starting the Ollama container..."
     compose_cmd up -d ollama
 
     ready=0
@@ -309,6 +352,7 @@ if [[ "$MODE" == container ]]; then
     fi
 
     if [[ "$PULL" == 1 ]] && ! compose_cmd exec -T ollama ollama show "$OLLAMA_MODEL" >/dev/null 2>&1; then
+        startup_status "Downloading the Ollama model..."
         echo "Pulling Ollama model $OLLAMA_MODEL..."
         compose_cmd exec -T ollama ollama pull "$OLLAMA_MODEL"
     fi
@@ -323,6 +367,7 @@ elif [[ "$MODE" == host ]]; then
         exit 1
     fi
     if [[ "$PULL" == 1 ]] && ! ollama show "$OLLAMA_MODEL" >/dev/null 2>&1; then
+        startup_status "Downloading the Ollama model..."
         echo "Pulling Ollama model $OLLAMA_MODEL..."
         ollama pull "$OLLAMA_MODEL" || echo "Could not pull $OLLAMA_MODEL; continuing." >&2
     fi
@@ -366,10 +411,13 @@ if [[ "$APP_MODE" == "container" ]]; then
         echo "Docker daemon is not available." >&2
         exit 1
     fi
+    startup_status "Building the Tech Watch container..."
     echo "Building Tech Watch app container..."
     compose_cmd build app
+    startup_status "Starting Tech Watch..."
     echo "Starting Tech Watch Tray in container..."
     docker rm -f tech-watch-app >/dev/null 2>&1 || true
+    stop_startup_dialog
     if [[ "$MODE" == container ]]; then
         compose_cmd run --rm -T --name tech-watch-app app "${APP_ARGS[@]}"
         exit $?
@@ -378,5 +426,7 @@ if [[ "$APP_MODE" == "container" ]]; then
     exit $?
 fi
 
+startup_status "Starting Tech Watch..."
+stop_startup_dialog
 echo "Starting Tech Watch Tray..."
 exec "$PY" "$ROOT/tech-watch.py" "${APP_ARGS[@]}"
