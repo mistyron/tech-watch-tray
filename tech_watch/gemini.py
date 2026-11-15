@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from .agy_auth import is_auth_error
 from .config import DEFAULT_CONFIG
 
 log = logging.getLogger(__name__)
@@ -437,6 +438,8 @@ def _friendly_error(text: str) -> str:
 
 
 def _is_fallback_error(text: str) -> bool:
+    if is_auth_error(text):
+        return True
     low = (text or "").lower()
     markers = (
         "resource_exhausted",

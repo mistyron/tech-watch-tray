@@ -174,6 +174,7 @@ def test_friendly_error_and_fallback_detection():
     assert gemini._is_fallback_error("resource_exhausted")
     assert gemini._is_fallback_error("code 429")
     assert gemini._is_fallback_error("rate limit")
+    assert gemini._is_fallback_error("OAuth token exchange failed")
     assert not gemini._is_fallback_error("syntax error")
 
 
@@ -307,6 +308,16 @@ def test_query_gemini_ollama_fallback_on_quota(monkeypatch):
     monkeypatch.setattr(gemini, "_command_argv", lambda *a, **k: list(argv))
     monkeypatch.setattr(gemini, "_resolve_command", lambda c: f"/bin/{c}")
     monkeypatch.setattr(gemini, "_run_analysis_command", lambda *a, **k: (None, "429 quota"))
+    fb = gemini.AnalysisResult("X", "WAIT", "fb", "t", True, "", "t")
+    monkeypatch.setattr(gemini, "_ollama_fallback", lambda *a, **k: fb)
+    assert gemini.query_gemini("X", {"query_template": "{symbol}"}) is fb
+
+
+def test_query_gemini_ollama_fallback_on_auth_error(monkeypatch):
+    argv = ["gemini", "-p", "q"]
+    monkeypatch.setattr(gemini, "_command_argv", lambda *a, **k: list(argv))
+    monkeypatch.setattr(gemini, "_resolve_command", lambda c: f"/bin/{c}")
+    monkeypatch.setattr(gemini, "_run_analysis_command", lambda *a, **k: (None, "OAuth token exchange failed"))
     fb = gemini.AnalysisResult("X", "WAIT", "fb", "t", True, "", "t")
     monkeypatch.setattr(gemini, "_ollama_fallback", lambda *a, **k: fb)
     assert gemini.query_gemini("X", {"query_template": "{symbol}"}) is fb
