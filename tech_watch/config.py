@@ -1,10 +1,12 @@
 import fcntl
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
 
 APP_NAME = "tech-watch"
+log = logging.getLogger(__name__)
 DEFAULT_CONFIG = {
     "symbols": ["XIC.TO"],
     "check_interval_hours": 24,
@@ -62,6 +64,13 @@ def config_path() -> Path:
     return config_dir() / "config.json"
 
 
+def _backup_invalid_config(path: Path) -> None:
+    try:
+        path.replace(path.with_suffix(".bak"))
+    except OSError as exc:
+        log.warning("Could not back up invalid config %s: %s", path, exc)
+
+
 def load_config() -> dict[str, Any]:
     path = config_path()
     if not path.exists():
@@ -69,9 +78,11 @@ def load_config() -> dict[str, Any]:
         return json.loads(json.dumps(DEFAULT_CONFIG))
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        data = {}
-    if not isinstance(data, dict):
+        if not isinstance(data, dict):
+            raise ValueError("config root is not a JSON object")
+    except Exception as exc:
+        log.warning("Config %s is invalid (%s); using defaults", path, exc)
+        _backup_invalid_config(path)
         data = {}
     merged = json.loads(json.dumps(DEFAULT_CONFIG))
     merged.update({k: v for k, v in data.items() if k != "ai" and v is not None})
@@ -90,6 +101,16 @@ def load_config() -> dict[str, Any]:
         merged["notify_on"] = DEFAULT_CONFIG["notify_on"][:]
     mode = str(merged.get("check_on_startup") or "due").strip().lower()
     merged["check_on_startup"] = mode if mode in {"due", "always", "never"} else "due"
+    raw_interval = merged.get("check_interval_hours")
+    try:
+        interval = int(DEFAULT_CONFIG["check_interval_hours"] if raw_interval in (None, "") else raw_interval)
+    except (TypeError, ValueError):
+        log.warning("Invalid check_interval_hours %r; using default", raw_interval)
+        interval = DEFAULT_CONFIG["check_interval_hours"]
+    if not 1 <= interval <= 168:
+        log.warning("check_interval_hours %s is out of range; clamping to 1-168", interval)
+        interval = max(1, min(168, interval))
+    merged["check_interval_hours"] = interval
     if not isinstance(user_ai.get("command"), list) or not user_ai.get("command"):
         legacy_cmd = data.get("gemini_command")
         legacy_args = data.get("gemini_args")

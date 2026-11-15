@@ -62,6 +62,16 @@ def test_load_config_handles_corrupt_json(monkeypatch, tmp_path):
     config.config_path().write_text("{not json", encoding="utf-8")
     loaded = config.load_config()
     assert loaded["symbols"] == config.DEFAULT_CONFIG["symbols"]
+    assert config.config_path().with_suffix(".bak").read_text(encoding="utf-8") == "{not json"
+
+
+def test_load_config_coerces_interval(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config.config_dir()
+    cases = [("24h", 24), (0, 1), (999, 168), (6, 6)]
+    for value, expected in cases:
+        config.config_path().write_text(json.dumps({"check_interval_hours": value}), encoding="utf-8")
+        assert config.load_config()["check_interval_hours"] == expected
 
 
 def test_load_config_handles_non_object_json(monkeypatch, tmp_path):
