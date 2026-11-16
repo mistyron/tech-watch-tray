@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Callable
 
 from PyQt6.QtCore import QObject, QPointF, QRectF, QSize, Qt, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QAction, QBrush, QColor, QIcon, QDesktopServices, QPainter, QPainterPath, QPen, QPixmap
+from PyQt6.QtGui import QAction, QBrush, QColor, QIcon, QDesktopServices, QKeySequence, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMenu,
+    QMenuBar,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -333,11 +334,12 @@ class ManageSymbolsDialog(QDialog):
 
 class DetailsDialog(QDialog):
     def __init__(self, cfg: dict[str, Any], current_symbol: str | None = None, parent: QWidget | None = None,
-                 on_check_symbol: Callable[[str], None] | None = None):
+                 on_check_symbol: Callable[[str], None] | None = None, tray_app: Any = None):
         super().__init__(parent)
         self.setWindowIcon(_tray_icon("idle"))
         self.cfg = cfg
         self._on_check_symbol = on_check_symbol
+        self._tray_app = tray_app
         self.check_status: dict[str, str] = {}
         self._status_since: dict[str, datetime] = {}
         self._check_icon = QIcon.fromTheme("view-refresh")
@@ -399,11 +401,7 @@ class DetailsDialog(QDialog):
         self._status_timer.timeout.connect(self._tick_status)
         self.finished.connect(lambda _: self._status_timer.stop())
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(self.reject)
-        buttons.accepted.connect(self.accept)
-        layout.addWidget(buttons)
-
+        self._build_menu_bar(layout)
         self.symbol_box.currentTextChanged.connect(self._load_symbol)
         self._refresh_overview()
         if current_symbol and current_symbol in self.symbols:
@@ -411,6 +409,103 @@ class DetailsDialog(QDialog):
             self.tabs.setCurrentIndex(1)
         elif self.symbols:
             self._load_symbol(self.symbols[0])
+
+    def _build_menu_bar(self, layout: QVBoxLayout) -> None:
+        bar = QMenuBar(self)
+        layout.setMenuBar(bar)
+        self._menu_bar = bar
+
+        file_menu = bar.addMenu("&File")
+        close_act = file_menu.addAction("&Close")
+        close_act.setShortcut(QKeySequence.StandardKey.Close)
+        close_act.triggered.connect(self.close)
+        quit_act = file_menu.addAction("&Quit")
+        quit_act.setShortcut(QKeySequence.StandardKey.Quit)
+        quit_slot = getattr(getattr(self._tray_app, "app", None), "quit", None)
+        quit_act.setEnabled(quit_slot is not None)
+        if quit_slot is not None:
+            quit_act.triggered.connect(quit_slot)
+
+        edit_menu = bar.addMenu("&Edit")
+        copy_act = edit_menu.addAction("&Copy")
+        copy_act.setShortcut(QKeySequence.StandardKey.Copy)
+        copy_act.triggered.connect(self._copy_selection)
+        select_all_act = edit_menu.addAction("Select &All")
+        select_all_act.setShortcut(QKeySequence.StandardKey.SelectAll)
+        select_all_act.triggered.connect(self._select_all_text)
+
+        view_menu = bar.addMenu("&View")
+        overview_act = view_menu.addAction("&Overview")
+        overview_act.setShortcut(QKeySequence("Ctrl+1"))
+        overview_act.triggered.connect(lambda: self.tabs.setCurrentIndex(0))
+        details_act = view_menu.addAction("Security &details")
+        details_act.setShortcut(QKeySequence("Ctrl+2"))
+        details_act.triggered.connect(lambda: self.tabs.setCurrentIndex(1))
+
+        tools_menu = bar.addMenu("&Tools")
+        self._check_all_action = self._add_tray_action(tools_menu, "Check all &now", "run_daily_check", "F5")
+        self._cancel_action = self._add_tray_action(tools_menu, "&Cancel check", "cancel_check")
+        tools_menu.addSeparator()
+        self._manage_action = self._add_tray_action(tools_menu, "&Manage securities...", "manage_symbols")
+        self._add_tray_action(tools_menu, "&Settings...", "show_settings", QKeySequence("Ctrl+,"))
+        self._add_tray_action(tools_menu, "TSX &Screener...", "show_screener")
+        tools_menu.addSeparator()
+        self._add_tray_action(tools_menu, "Open &config file location", "show_config_location")
+        self._add_tray_action(tools_menu, "Open &log file", "show_log_location")
+
+        help_menu = bar.addMenu("&Help")
+        about_act = help_menu.addAction("&About")
+        about_act.triggered.connect(self._show_about)
+
+        self._sync_menu_actions()
+
+    def _add_tray_action(
+        self,
+        menu: QMenu,
+        text: str,
+        method: str,
+        shortcut: QKeySequence | str | None = None,
+    ) -> QAction:
+        act = menu.addAction(text)
+        if shortcut is not None:
+            act.setShortcut(shortcut)
+        slot = getattr(self._tray_app, method, None) if self._tray_app is not None else None
+        act.setEnabled(slot is not None)
+        if slot is not None:
+            act.triggered.connect(slot)
+        return act
+
+    def _focused_text_widget(self) -> QLineEdit | QPlainTextEdit | None:
+        widget = QApplication.focusWidget()
+        return widget if isinstance(widget, (QLineEdit, QPlainTextEdit)) else None
+
+    def _copy_selection(self) -> None:
+        widget = self._focused_text_widget()
+        if widget is not None:
+            widget.copy()
+
+    def _select_all_text(self) -> None:
+        widget = self._focused_text_widget()
+        if widget is not None:
+            widget.selectAll()
+
+    def _sync_menu_actions(self) -> None:
+        if self._tray_app is None:
+            return
+        busy = bool(self.check_status)
+        self._check_all_action.setEnabled(not busy)
+        self._cancel_action.setEnabled(busy)
+        self._manage_action.setEnabled(not busy)
+
+    def _show_about(self) -> None:
+        from . import __version__
+
+        QMessageBox.about(
+            self,
+            "About Tech Watch Tray",
+            f"Tech Watch Tray {__version__}\n\n"
+            "KDE/Plasma tray app that checks security technicals via a configurable AI CLI.",
+        )
 
     def update_data(self, cfg: dict[str, Any], symbol: str | None = None) -> None:
         self.cfg = cfg
@@ -467,6 +562,7 @@ class DetailsDialog(QDialog):
             self._status_timer.stop()
         self._refresh_overview()
         self._update_status_bar()
+        self._sync_menu_actions()
         current = self.symbol_box.currentText().strip().upper()
         if current:
             self._load_symbol(current)
@@ -1407,7 +1503,7 @@ class TrayApp(QObject):
             dlg.raise_()
             dlg.activateWindow()
             return
-        dlg = DetailsDialog(self.cfg, symbol, None, self.check_single_symbol)
+        dlg = DetailsDialog(self.cfg, symbol, None, self.check_single_symbol, self)
         dlg.set_check_status(self._check_status, self._status_since)
         self._details_dialog = dlg
         dlg.finished.connect(self._details_closed)

@@ -105,6 +105,79 @@ def test_details_dialog_in_place_refresh_preserves_widgets(qapp):
     dlg.close()
 
 
+def test_details_dialog_menu_bar_invokes_tray_actions(qapp, monkeypatch):
+    calls = []
+
+    class FakeApp:
+        def quit(self):
+            calls.append("quit")
+
+    class FakeTray:
+        def __init__(self):
+            self.app = FakeApp()
+
+        def run_daily_check(self):
+            calls.append("check")
+
+        def cancel_check(self):
+            calls.append("cancel")
+
+        def manage_symbols(self):
+            calls.append("manage")
+
+        def show_settings(self):
+            calls.append("settings")
+
+        def show_screener(self):
+            calls.append("screener")
+
+        def show_config_location(self):
+            calls.append("config")
+
+        def show_log_location(self):
+            calls.append("log")
+
+    monkeypatch.setattr(app_mod.QMessageBox, "about", lambda *a, **k: calls.append("about"))
+    dlg = app_mod.DetailsDialog({"symbols": ["A.TO"], "last_results": {}}, tray_app=FakeTray())
+    actions = {action.text().replace("&", ""): action for action in dlg.findChildren(app_mod.QAction)}
+
+    for label in ("File", "Edit", "View", "Tools", "Help"):
+        assert label in actions
+    for label in (
+        "Close",
+        "Copy",
+        "Select All",
+        "Check all now",
+        "Cancel check",
+        "Manage securities...",
+        "Settings...",
+        "TSX Screener...",
+        "Open config file location",
+        "Open log file",
+        "Quit",
+        "About",
+    ):
+        assert label in actions
+
+    for label in ("Check all now", "Manage securities...", "Settings...", "TSX Screener...",
+                  "Open config file location", "Open log file", "Quit", "About"):
+        actions[label].trigger()
+    assert calls == ["check", "manage", "settings", "screener", "config", "log", "quit", "about"]
+
+    dlg.set_check_status({"A.TO": "pending"})
+    assert not actions["Check all now"].isEnabled()
+    assert actions["Cancel check"].isEnabled()
+    assert not actions["Manage securities..."].isEnabled()
+    actions["Cancel check"].trigger()
+    assert calls[-1] == "cancel"
+
+    actions["Security details"].trigger()
+    assert dlg.tabs.currentIndex() == 1
+    actions["Overview"].trigger()
+    assert dlg.tabs.currentIndex() == 0
+    dlg.close()
+
+
 def test_details_dialog_check_button_invokes_callback(qapp):
     checked = []
     callback = checked.append
@@ -156,10 +229,15 @@ def test_details_dialog_check_button_without_callback_is_safe(qapp):
 def test_show_details_wires_single_symbol_check(qapp, monkeypatch):
     monkeypatch.setattr(app_mod, "load_config", lambda: {"symbols": ["A.TO"], "last_results": {}})
 
+    class FakeApp:
+        def quit(self):
+            pass
+
     class FakeTray:
         show_details = app_mod.TrayApp.show_details
 
         def __init__(self):
+            self.app = FakeApp()
             self._details_dialog = None
             self._check_status = {}
             self._status_since = {}
