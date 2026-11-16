@@ -18,9 +18,10 @@ def test_resolve_command_uses_which(monkeypatch):
 
 def test_resolve_command_fallback_path(monkeypatch):
     monkeypatch.setattr(gemini.shutil, "which", lambda c: None)
-    monkeypatch.setattr(gemini.subprocess.os.path, "exists", lambda p: True)
-    expected = gemini.subprocess.os.path.join(
-        gemini.subprocess.os.path.expanduser("~"), ".npm-global", "bin", "gemini"
+    monkeypatch.setattr(gemini.os.path, "exists", lambda p: True)
+    monkeypatch.setattr(gemini.os, "access", lambda p, mode: True)
+    expected = gemini.os.path.join(
+        gemini.os.path.expanduser("~"), ".npm-global", "bin", "gemini"
     )
     assert gemini._resolve_command("gemini") == expected
 

@@ -19,7 +19,21 @@ def test_to_yahoo_symbol():
     assert screener._to_yahoo_symbol("$AAPL") == "AAPL.TO"
     assert screener._to_yahoo_symbol("BBD.B") == "BBD-B.TO"
     assert screener._to_yahoo_symbol("BBD.B.TO") == "BBD-B.TO"
+    assert screener._to_yahoo_symbol("BMO.PR.Q") == "BMO-PR-Q.TO"
+    assert screener._to_yahoo_symbol("SHOP-TO") == "SHOP.TO"
+    assert screener._to_yahoo_symbol("BBD.B-TO") == "BBD-B.TO"
     assert screener._to_yahoo_symbol("") == ""
+
+
+def test_rsi_pure_uptrend_and_flat():
+    up = pd.Series([10.0 + i for i in range(25)], dtype=float)
+    assert screener._rsi(up, 14).iloc[-1] == 100.0
+
+    down = pd.Series([50.0 - i for i in range(25)], dtype=float)
+    assert screener._rsi(down, 14).iloc[-1] == 0.0
+
+    flat = pd.Series([20.0 for _ in range(25)], dtype=float)
+    assert screener._rsi(flat, 14).iloc[-1] == 50.0
 
 
 def test_chunks():

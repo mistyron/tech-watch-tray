@@ -493,8 +493,14 @@ class DetailsDialog(QDialog):
             summary_item = self.overview_table.item(row, 4)
             if verdict_item is not None:
                 verdict_item.setText(self._updating_label(symbol))
+                elapsed = self._elapsed_label(symbol)
+                verdict_item.setToolTip(
+                    f"Status: {active[symbol]}\nElapsed: {elapsed or '0s'}\n"
+                    "Use the tray menu's 'Cancel check' if this is taking too long."
+                )
             if summary_item is not None:
                 summary_item.setText(active[symbol])
+                summary_item.setToolTip(active[symbol])
         self._update_status_bar()
 
     def _update_status_bar(self) -> None:
@@ -521,63 +527,99 @@ class DetailsDialog(QDialog):
 
     def _refresh_overview(self) -> None:
         results = self.cfg.get("last_results") if isinstance(self.cfg.get("last_results"), dict) else {}
-        self.overview_table.setRowCount(0)
-        for symbol in self.symbols:
-            data = results.get(symbol) or {}
-            verdict = str(data.get("verdict") or "—")
-            checked = self._fmt_time(data.get("checked_at"))
-            summary = str(data.get("summary") or "")
-            status = self.check_status.get(symbol)
-            if status == "pending":
-                verdict = "PENDING"
-                summary = summary or "Queued for update…"
-            elif status:
-                verdict = self._updating_label(symbol)
-                summary = str(status) or "Check in progress…"
-            row = self.overview_table.rowCount()
-            self.overview_table.insertRow(row)
-            check_btn = QPushButton()
-            check_btn.setFixedSize(26, 26)
-            check_btn.setIcon(self._check_icon)
-            check_btn.setIconSize(QSize(16, 16))
-            check_btn.setFlat(True)
-            check_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            check_btn.setEnabled(status is None)
-            check_btn.setToolTip(
-                f"Check technicals for {symbol}"
-                if status is None
-                else f"Check already in progress for {symbol}"
+        can_update_in_place = (
+            self.overview_table.rowCount() == len(self.symbols)
+            and all(
+                self.overview_table.item(i, 1) is not None
+                and self.overview_table.item(i, 1).text() == sym
+                for i, sym in enumerate(self.symbols)
             )
-            check_btn.clicked.connect(lambda _checked=False, s=symbol: self._check_symbol(s))
-            self.overview_table.setCellWidget(row, 0, check_btn)
-            # Set symbol verdict and other data in columns 1-4
-            values = [symbol, verdict, checked, summary]
-            for col, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                if col == 1 and verdict.upper() == "BUY":
-                    item.setForeground(Qt.GlobalColor.darkGreen)
-                elif col == 1 and verdict.upper() in {"ERROR", "SELL"}:
-                    item.setForeground(Qt.GlobalColor.darkRed)
-                elif col == 1 and verdict.upper() == "WAIT":
-                    item.setForeground(Qt.GlobalColor.darkYellow)
-                elif col == 1 and verdict.upper().startswith("UPDATING"):
-                    item.setForeground(QColor(61, 174, 233))
-                elif col == 1 and verdict.upper() == "PENDING":
-                    item.setForeground(Qt.GlobalColor.gray)
-                if status and col in (1, 2):  # symbol and verdict columns
-                    font = item.font()
-                    font.setItalic(True)
-                    item.setFont(font)
-                if status and status != "pending" and col == 1:
+        )
+        self.overview_table.setUpdatesEnabled(False)
+        try:
+            if not can_update_in_place:
+                self.overview_table.setRowCount(0)
+            for row, symbol in enumerate(self.symbols):
+                data = results.get(symbol) or {}
+                verdict = str(data.get("verdict") or "—")
+                checked = self._fmt_time(data.get("checked_at"))
+                summary = str(data.get("summary") or "")
+                status = self.check_status.get(symbol)
+                if status == "pending":
+                    verdict = "PENDING"
+                    summary = summary or "Queued for update…"
+                elif status:
+                    verdict = self._updating_label(symbol)
+                    summary = str(status) or "Check in progress…"
+
+                if not can_update_in_place:
+                    self.overview_table.insertRow(row)
+                    check_btn = QPushButton()
+                    check_btn.setFixedSize(26, 26)
+                    check_btn.setIcon(self._check_icon)
+                    check_btn.setIconSize(QSize(16, 16))
+                    check_btn.setFlat(True)
+                    check_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                    check_btn.clicked.connect(lambda _checked=False, s=symbol: self._check_symbol(s))
+                    self.overview_table.setCellWidget(row, 0, check_btn)
+                    for col in range(1, 5):
+                        self.overview_table.setItem(row, col, QTableWidgetItem())
+                else:
+                    check_btn = self.overview_table.cellWidget(row, 0)
+
+                if check_btn is not None:
+                    check_btn.setEnabled(status is None)
+                    check_btn.setToolTip(
+                        f"Check technicals for {symbol}"
+                        if status is None
+                        else f"Check already in progress for {symbol}"
+                    )
+
+                sym_item = self.overview_table.item(row, 1)
+                verdict_item = self.overview_table.item(row, 2)
+                checked_item = self.overview_table.item(row, 3)
+                summary_item = self.overview_table.item(row, 4)
+
+                sym_item.setText(symbol)
+                verdict_item.setText(verdict)
+                checked_item.setText(checked)
+                summary_item.setText(summary)
+
+                base_font = self.overview_table.font()
+                italic_font = self.overview_table.font()
+                italic_font.setItalic(True)
+
+                sym_item.setFont(italic_font if status else base_font)
+                verdict_item.setFont(italic_font if status else base_font)
+                checked_item.setFont(base_font)
+                summary_item.setFont(base_font)
+
+                v_up = verdict.upper()
+                if v_up == "BUY":
+                    verdict_item.setForeground(Qt.GlobalColor.darkGreen)
+                elif v_up in {"ERROR", "SELL"}:
+                    verdict_item.setForeground(Qt.GlobalColor.darkRed)
+                elif v_up == "WAIT":
+                    verdict_item.setForeground(Qt.GlobalColor.darkYellow)
+                elif v_up.startswith("UPDATING"):
+                    verdict_item.setForeground(QColor(61, 174, 233))
+                elif v_up == "PENDING":
+                    verdict_item.setForeground(Qt.GlobalColor.gray)
+                else:
+                    verdict_item.setData(Qt.ItemDataRole.ForegroundRole, None)
+
+                if status and status != "pending":
                     elapsed = self._elapsed_label(symbol)
-                    item.setToolTip(
+                    verdict_item.setToolTip(
                         f"Status: {status}\nElapsed: {elapsed or '0s'}\n"
                         "Use the tray menu's 'Cancel check' if this is taking too long."
                     )
-                if col == 3 and summary:
-                    item.setToolTip(summary)
-                # Column index shifted by 1 due to Check column
-                self.overview_table.setItem(row, col + 1, item)
+                else:
+                    verdict_item.setToolTip("")
+
+                summary_item.setToolTip(summary if summary else "")
+        finally:
+            self.overview_table.setUpdatesEnabled(True)
 
     def _check_symbol(self, symbol: str) -> None:
         if symbol in self.check_status:

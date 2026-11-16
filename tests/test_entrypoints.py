@@ -4,6 +4,9 @@ from pathlib import Path
 
 
 def test_package_main_exports():
+    pkg = importlib.import_module("tech_watch")
+    assert hasattr(pkg, "main")
+    assert pkg.main
     mod = importlib.import_module("tech_watch.__main__")
     assert hasattr(mod, "main")
     # guarded; importing should not exit

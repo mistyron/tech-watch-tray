@@ -60,6 +60,9 @@ def _to_yahoo_symbol(symbol: str) -> str:
     if s.endswith(".TO"):
         base = s[:-3]
         return f"{base.replace('.', '-')}.TO"
+    if s.endswith("-TO"):
+        base = s[:-3]
+        return f"{base.replace('.', '-')}.TO"
     if "." in s:
         return f"{s.replace('.', '-')}.TO"
     # bare Canadian tickers in some lists need exchange suffix; default to TSX
@@ -92,13 +95,15 @@ def fetch_tsx_composite_symbols(timeout: int = 20) -> list[dict[str, str]]:
                 sym_col = t.columns[0]
             rows = []
             for _, row in t.iterrows():
-                sym = str(row.get(sym_col, "")).strip().upper().replace(".", "-")
-                if not sym or sym == "NAN":
+                raw_sym = str(row.get(sym_col, "")).strip().upper()
+                if not raw_sym or raw_sym == "NAN":
                     continue
                 name = str(row.get(name_col, "")).strip() if name_col is not None else ""
                 if name == "nan":
                     name = ""
-                rows.append({"symbol": _to_yahoo_symbol(sym), "name": name, "source_symbol": sym})
+                yahoo_sym = _to_yahoo_symbol(raw_sym)
+                source_sym = yahoo_sym[:-3] if yahoo_sym.endswith(".TO") else yahoo_sym
+                rows.append({"symbol": yahoo_sym, "name": name, "source_symbol": source_sym})
             if rows:
                 return rows
     raise RuntimeError("Could not find TSX Composite constituents table")
@@ -150,7 +155,10 @@ def _rsi(close: pd.Series, n: int = 14) -> pd.Series:
     ma_up = up.ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
     ma_down = down.ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
     rs = ma_up / ma_down.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.where(~((ma_down == 0) & (ma_up > 0)), 100.0)
+    rsi = rsi.where(~((ma_down == 0) & (ma_up == 0)), 50.0)
+    return rsi
 
 
 def _macd(close: pd.Series) -> tuple[pd.Series, pd.Series, pd.Series]:

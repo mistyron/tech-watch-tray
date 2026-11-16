@@ -91,6 +91,20 @@ def test_details_dialog_only_ticks_active_status(qapp):
     dlg.close()
 
 
+def test_details_dialog_in_place_refresh_preserves_widgets(qapp):
+    dlg = app_mod.DetailsDialog({"symbols": ["A.TO", "B.TO"], "last_results": {}})
+    btn_before = dlg.overview_table.cellWidget(0, 0)
+    item_before = dlg.overview_table.item(0, 1)
+    dlg.set_check_status({"A.TO": "checking AI"})
+    btn_after = dlg.overview_table.cellWidget(0, 0)
+    item_after = dlg.overview_table.item(0, 1)
+    assert btn_before is btn_after
+    assert item_before is item_after
+    assert not btn_after.isEnabled()
+    dlg._status_timer.stop()
+    dlg.close()
+
+
 def test_details_dialog_check_button_invokes_callback(qapp):
     checked = []
     callback = checked.append

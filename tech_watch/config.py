@@ -50,6 +50,7 @@ def config_dir() -> Path:
     base = os.environ.get("XDG_CONFIG_HOME")
     path = Path(base) / APP_NAME if base else Path.home() / ".config" / APP_NAME
     path.mkdir(parents=True, exist_ok=True)
+    _restrict_permissions(path, 0o700)
     return path
 
 
@@ -57,6 +58,7 @@ def data_dir() -> Path:
     base = os.environ.get("XDG_DATA_HOME")
     path = Path(base) / APP_NAME if base else Path.home() / ".local" / "share" / APP_NAME
     path.mkdir(parents=True, exist_ok=True)
+    _restrict_permissions(path, 0o700)
     return path
 
 
@@ -72,9 +74,18 @@ def coerce_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, number))
 
 
-def _backup_invalid_config(path: Path) -> None:
+def _restrict_permissions(path: Path, mode: int = 0o600) -> None:
     try:
-        path.replace(path.with_suffix(".bak"))
+        path.chmod(mode)
+    except OSError as exc:
+        log.warning("Could not restrict permissions on %s: %s", path, exc)
+
+
+def _backup_invalid_config(path: Path) -> None:
+    backup = path.with_suffix(".bak")
+    try:
+        path.replace(backup)
+        _restrict_permissions(backup, 0o600)
     except OSError as exc:
         log.warning("Could not back up invalid config %s: %s", path, exc)
 
@@ -84,6 +95,7 @@ def load_config() -> dict[str, Any]:
     if not path.exists():
         save_config(DEFAULT_CONFIG.copy())
         return json.loads(json.dumps(DEFAULT_CONFIG))
+    _restrict_permissions(path)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
@@ -143,10 +155,13 @@ def save_config(cfg: dict[str, Any]) -> None:
     path = config_path()
     lock_path = path.with_suffix(".lock")
     with lock_path.open("a", encoding="utf-8") as lock:
+        _restrict_permissions(lock_path, 0o600)
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
             tmp = path.with_suffix(".tmp")
             tmp.write_text(json.dumps(cfg, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            _restrict_permissions(tmp, 0o600)
             tmp.replace(path)
+            _restrict_permissions(path, 0o600)
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)

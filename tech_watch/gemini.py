@@ -131,19 +131,19 @@ def _resolve_command(cmd: str) -> str | None:
     p = shutil.which(cmd)
     if p:
         return p
-    home = str(subprocess.os.path.expanduser("~"))
+    home = os.path.expanduser("~")
     fallbacks = {
         "gemini": [
-            subprocess.os.path.join(home, ".npm-global", "bin", "gemini"),
+            os.path.join(home, ".npm-global", "bin", "gemini"),
         ],
         "agy": [
-            subprocess.os.path.join(home, ".local", "bin", "agy"),
-            subprocess.os.path.join(home, ".npm-global", "bin", "agy"),
+            os.path.join(home, ".local", "bin", "agy"),
+            os.path.join(home, ".npm-global", "bin", "agy"),
             "/usr/local/bin/agy",
         ],
         "antigravity": [
-            subprocess.os.path.join(home, ".local", "bin", "antigravity"),
-            subprocess.os.path.join(home, ".npm-global", "bin", "antigravity"),
+            os.path.join(home, ".local", "bin", "antigravity"),
+            os.path.join(home, ".npm-global", "bin", "antigravity"),
             "/usr/local/bin/antigravity",
         ],
         "ollama": [
@@ -155,7 +155,7 @@ def _resolve_command(cmd: str) -> str | None:
     for fb in fallbacks.get(cmd, []):
         if fb and shutil.which(fb):
             return shutil.which(fb)
-        if fb and subprocess.os.path.exists(fb) and subprocess.os.access(fb, subprocess.os.X_OK):
+        if fb and os.path.exists(fb) and os.access(fb, os.X_OK):
             return fb
     return None
 
@@ -225,7 +225,7 @@ def _command_argv(symbol: str, prompt: str, cfg: dict[str, Any]) -> list[str] | 
 def _is_agy_command(argv: list[str]) -> bool:
     if not argv:
         return False
-    name = subprocess.os.path.basename(str(argv[0])).lower()
+    name = os.path.basename(str(argv[0])).lower()
     return name in {"agy", "agy.exe", "antigravity", "antigravity.exe"}
 
 
@@ -617,7 +617,7 @@ def _model_label(argv: list[str]) -> str:
     if _is_agy_command(argv):
         m = _current_agy_model(argv)
         return f"agy" + (f" [{m}]" if m else "")
-    return subprocess.os.path.basename(str(argv[0])) if argv else "AI"
+    return os.path.basename(str(argv[0])) if argv else "AI"
 
 
 def _stop_process(proc: subprocess.Popen) -> None:

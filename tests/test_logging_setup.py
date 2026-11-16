@@ -12,6 +12,8 @@ def test_setup_logging_writes_rotating_file(monkeypatch, tmp_path):
     try:
         path = setup_logging()
         assert path == tmp_path / "tech-watch" / "tech-watch.log"
+        assert (path.parent.stat().st_mode & 0o777) == 0o700
+        assert (path.stat().st_mode & 0o777) == 0o600
         logging.getLogger("test").warning("hello")
         assert "hello" in path.read_text(encoding="utf-8")
         assert setup_logging() == path
@@ -42,6 +44,7 @@ def test_setup_logging_writes_to_stdout(monkeypatch, tmp_path, capsys):
             root.removeHandler(handler)
             handler.close()
         root.setLevel(before_level)
+
 
 
 def test_setup_logging_reads_env_level(monkeypatch, tmp_path):

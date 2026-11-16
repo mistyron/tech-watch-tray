@@ -9,6 +9,28 @@ from .config import data_dir
 _FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 
+def _restrict_permissions(path: Path, mode: int = 0o600) -> None:
+    try:
+        path.chmod(mode)
+    except OSError as exc:
+        logging.getLogger(__name__).warning("Could not restrict permissions on %s: %s", path, exc)
+
+
+class RestrictedRotatingFileHandler(RotatingFileHandler):
+    def _open(self):
+        f = super()._open()
+        _restrict_permissions(Path(self.baseFilename), 0o600)
+        return f
+
+    def doRollover(self):
+        super().doRollover()
+        _restrict_permissions(Path(self.baseFilename), 0o600)
+        base = Path(self.baseFilename)
+        for backup in base.parent.glob(f"{base.name}.*"):
+            if backup.is_file():
+                _restrict_permissions(backup, 0o600)
+
+
 def log_path() -> Path:
     return data_dir() / "tech-watch.log"
 
@@ -38,9 +60,12 @@ def setup_logging(level: int | str | None = None) -> Path:
         None,
     )
     if file_handler is None:
-        file_handler = RotatingFileHandler(path, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+        file_handler = RestrictedRotatingFileHandler(path, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
         file_handler.setFormatter(formatter)
         root.addHandler(file_handler)
+
+    if path.exists():
+        _restrict_permissions(path, 0o600)
 
     console_handler = next((h for h in root.handlers if getattr(h, "_tech_watch_console", False)), None)
     if console_handler is None:

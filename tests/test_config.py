@@ -62,7 +62,9 @@ def test_load_config_handles_corrupt_json(monkeypatch, tmp_path):
     config.config_path().write_text("{not json", encoding="utf-8")
     loaded = config.load_config()
     assert loaded["symbols"] == config.DEFAULT_CONFIG["symbols"]
-    assert config.config_path().with_suffix(".bak").read_text(encoding="utf-8") == "{not json"
+    backup = config.config_path().with_suffix(".bak")
+    assert backup.read_text(encoding="utf-8") == "{not json"
+    assert (backup.stat().st_mode & 0o777) == 0o600
 
 
 def test_load_config_coerces_interval(monkeypatch, tmp_path):
@@ -154,3 +156,15 @@ def test_load_config_preserves_valid_startup_modes(monkeypatch, tmp_path):
         config.config_dir()
         config.config_path().write_text(json.dumps({"check_on_startup": mode}), encoding="utf-8")
         assert config.load_config()["check_on_startup"] == mode
+
+
+def test_config_files_and_dirs_have_restricted_permissions(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    cfg = config.json.loads(config.json.dumps(config.DEFAULT_CONFIG))
+    config.save_config(cfg)
+    cfg_file = config.config_path()
+    cfg_dir = config.config_dir()
+    lock_file = cfg_file.with_suffix(".lock")
+    assert (cfg_file.stat().st_mode & 0o777) == 0o600
+    assert (cfg_dir.stat().st_mode & 0o777) == 0o700
+    assert (lock_file.stat().st_mode & 0o777) == 0o600
