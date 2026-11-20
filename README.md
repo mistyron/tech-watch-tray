@@ -11,6 +11,10 @@ A small Linux tray application for KDE/Plasma that monitors stock/security techn
 - Shows a desktop notification when a verdict matches your alert set (default: `BUY`).
 - Lets you view the full response per symbol from the tray menu.
 
+## Architecture
+
+See [docs/architecture.md](docs/architecture.md) for the component and data-flow diagram.
+
 ## Requirements
 
 - Linux KDE/Plasma session with system tray support.
