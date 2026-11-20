@@ -350,7 +350,7 @@ def fetch_live_snapshot(symbol: str) -> tuple[str, str]:
     for candidate in candidates:
         try:
             candidate_data = yf.download(
-                candidate, period="10mo", interval="1d", progress=False, auto_adjust=True, threads=False
+                candidate, period="14mo", interval="1d", progress=False, auto_adjust=True, threads=False
             )
         except Exception as e:
             errors.append(f"{candidate}: {e}")

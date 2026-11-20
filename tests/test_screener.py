@@ -157,6 +157,7 @@ def test_screen_symbols_with_mocked_yfinance(monkeypatch):
     assert isinstance(hits, list)
     assert calls
     assert errors == []
+    assert fake_yf.calls[0]["period"] == "14mo"
     assert fake_yf.calls[0]["auto_adjust"] is True
 
 
@@ -192,7 +193,7 @@ class SimpleNamespaceYF:
         self.calls = []
 
     def download(self, tickers, period, interval, group_by, auto_adjust, progress, threads, actions=False):
-        self.calls.append({"tickers": tickers, "auto_adjust": auto_adjust})
+        self.calls.append({"tickers": tickers, "period": period, "auto_adjust": auto_adjust})
         # return MultiIndex like yfinance group_by='ticker' for multiple tickers
         syms = str(tickers).split()
         if len(syms) <= 1:

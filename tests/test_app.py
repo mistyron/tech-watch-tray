@@ -1,5 +1,7 @@
+import json
 import logging
 import os
+import time
 from datetime import datetime, timedelta
 
 import pytest
@@ -175,6 +177,255 @@ def test_details_dialog_menu_bar_invokes_tray_actions(qapp, monkeypatch):
     assert dlg.tabs.currentIndex() == 1
     actions["Overview"].trigger()
     assert dlg.tabs.currentIndex() == 0
+    dlg.close()
+
+
+def test_details_dialog_terminal_split_toggle(qapp):
+    dlg = app_mod.DetailsDialog({"symbols": ["A.TO"], "last_results": {}})
+    actions = {action.text().replace("&", ""): action for action in dlg.findChildren(app_mod.QAction)}
+    action = actions["Terminal panel"]
+    assert action.isCheckable()
+    assert action.isChecked()
+    assert dlg.splitter.widget(1) is dlg.terminal
+    assert dlg.splitter.handle(1) is not None
+    assert not dlg.terminal.isHidden()
+
+    action.trigger()
+    assert dlg.terminal.isHidden()
+    action.trigger()
+    assert not dlg.terminal.isHidden()
+    dlg.close()
+
+
+def test_details_dialog_terminal_default_size_is_quarter(qapp):
+    dlg = app_mod.DetailsDialog({"symbols": ["A.TO"], "last_results": {}})
+    dlg.show()
+    qapp.processEvents()
+    top, bottom = dlg.splitter.sizes()
+    assert top > 0 and bottom > 0
+    assert abs(bottom / (top + bottom) - 0.25) < 0.08
+    dlg.close()
+
+
+def test_details_dialog_logs_tab_receives_log_records(qapp, caplog):
+    dlg = app_mod.DetailsDialog({"symbols": ["A.TO"], "last_results": {}})
+    with caplog.at_level(logging.INFO):
+        logging.getLogger("tech_watch.test").info("terminal log line")
+    assert "terminal log line" in dlg.terminal.log_view.toPlainText()
+    dlg.close()
+    assert dlg._log_handler not in logging.getLogger().handlers
+
+
+def test_details_dialog_logs_tab_preloads_recent_log(qapp, tmp_path, monkeypatch):
+    log_file = tmp_path / "tech-watch.log"
+    log_file.write_text("old line one\nold line two\n", encoding="utf-8")
+    monkeypatch.setattr(app_mod, "log_path", lambda: log_file)
+    dlg = app_mod.DetailsDialog({"symbols": ["A.TO"], "last_results": {}})
+    text = dlg.terminal.log_view.toPlainText()
+    assert "old line one" in text
+    assert "old line two" in text
+    dlg.close()
+
+
+def test_details_dialog_log_level_checkboxes_filter_and_save(qapp):
+    cfg = {"symbols": ["A.TO"], "last_results": {}}
+    dlg = app_mod.DetailsDialog(cfg)
+    assert all(box.isChecked() for box in dlg.terminal.checks.values())
+    logging.getLogger("tech_watch.gemini").debug("debug detail")
+    assert "debug detail" in dlg.terminal.log_view.toPlainText()
+    dlg.terminal.checks[logging.DEBUG].setChecked(False)
+    assert "debug detail" not in dlg.terminal.log_view.toPlainText()
+    assert "DEBUG" not in cfg["log_levels"]
+    assert "INFO" in cfg["log_levels"]
+    dlg.close()
+
+
+def test_details_dialog_restores_saved_log_levels(qapp):
+    cfg = {"symbols": ["A.TO"], "last_results": {}, "log_levels": ["ERROR"]}
+    dlg = app_mod.DetailsDialog(cfg)
+    assert dlg.terminal.checks[logging.ERROR].isChecked()
+    assert not dlg.terminal.checks[logging.INFO].isChecked()
+    assert not dlg.terminal.checks[logging.DEBUG].isChecked()
+    dlg.close()
+
+
+def test_details_dialog_saves_split_size(qapp):
+    cfg = {"symbols": ["A.TO"], "last_results": {}}
+    dlg = app_mod.DetailsDialog(cfg)
+    dlg.show()
+    qapp.processEvents()
+    dlg.splitter.setSizes([200, 80])
+    dlg._save_ui_settings()
+    assert cfg["terminal_split"] == dlg.splitter.sizes()
+    dlg.close()
+
+
+def test_details_dialog_restores_saved_split_size(qapp):
+    cfg = {"symbols": ["A.TO"], "last_results": {}}
+    first = app_mod.DetailsDialog(cfg)
+    first.show()
+    qapp.processEvents()
+    first.splitter.setSizes([321, 123])
+    qapp.processEvents()
+    first._save_ui_settings()
+    saved = list(cfg["terminal_split"])
+    first.close()
+
+    second = app_mod.DetailsDialog(cfg)
+    second.show()
+    qapp.processEvents()
+    assert second.splitter.sizes() == saved
+    second.close()
+
+
+def test_details_dialog_saves_levels_via_tray(qapp):
+    class FakeTray:
+        def __init__(self):
+            self.cfg = {}
+            self.saved = 0
+
+        def _save(self):
+            self.saved += 1
+            return True
+
+    tray = FakeTray()
+    dlg = app_mod.DetailsDialog({"symbols": ["A.TO"], "last_results": {}}, tray_app=tray)
+    dlg.terminal.checks[logging.DEBUG].setChecked(False)
+    assert tray.saved == 1
+    assert "DEBUG" not in tray.cfg["log_levels"]
+    dlg.close()
+
+
+def test_details_dialog_saves_and_restores_window_size_and_position(qapp):
+    cfg = {"symbols": ["A.TO"], "last_results": {}}
+    first = app_mod.DetailsDialog(cfg)
+    first.show()
+    qapp.processEvents()
+    first.resize(1020, 720)
+    first.move(140, 190)
+    qapp.processEvents()
+    first._save_ui_settings()
+    assert cfg["details_size"] == [1020, 720]
+    assert cfg["details_pos"] == [140, 190]
+    first.close()
+
+    second = app_mod.DetailsDialog(cfg)
+    second.show()
+    qapp.processEvents()
+    assert second.width() == 1020
+    assert second.height() == 720
+    assert second.x() == 140
+    assert second.y() == 190
+    second.close()
+
+
+def test_details_dialog_persistence_across_app_restart(qapp, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config_dir = tmp_path / "tech-watch"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    cfg_file = config_dir / "config.json"
+    initial_cfg = app_mod.load_config()
+    initial_cfg["symbols"] = ["A.TO"]
+    app_mod.save_config(initial_cfg)
+
+    # 1. Start TrayApp instance 1
+    tray1 = app_mod.TrayApp(qapp)
+    tray1.show_details()
+    dlg1 = tray1._details_dialog
+    assert dlg1 is not None
+    dlg1.show()
+    qapp.processEvents()
+
+    # Change level checkboxes: uncheck DEBUG and INFO
+    dlg1.terminal.checks[logging.DEBUG].setChecked(False)
+    dlg1.terminal.checks[logging.INFO].setChecked(False)
+    # Change splitter sizes
+    dlg1.splitter.setSizes([350, 150])
+    # Change window size and position
+    dlg1.resize(1050, 750)
+    dlg1.move(120, 160)
+    qapp.processEvents()
+    expected_split = dlg1.splitter.sizes()
+
+    # Close the dialog
+    dlg1.close()
+    qapp.processEvents()
+    assert tray1._details_dialog is None
+
+    # Verify saved to disk
+    saved_on_disk = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert saved_on_disk["log_levels"] == ["WARNING", "ERROR"]
+    assert saved_on_disk["terminal_split"] == expected_split
+    assert saved_on_disk["details_size"] == [1050, 750]
+    assert saved_on_disk["details_pos"] == [120, 160]
+
+    # 2. Simulate application restart: new TrayApp loads saved config from disk
+    tray2 = app_mod.TrayApp(qapp)
+    tray2.show_details()
+    dlg2 = tray2._details_dialog
+    assert dlg2 is not None
+    dlg2.show()
+    qapp.processEvents()
+
+    # Verify restored settings and geometry
+    assert not dlg2.terminal.checks[logging.DEBUG].isChecked()
+    assert not dlg2.terminal.checks[logging.INFO].isChecked()
+    assert dlg2.terminal.checks[logging.WARNING].isChecked()
+    assert dlg2.terminal.checks[logging.ERROR].isChecked()
+    assert dlg2.splitter.sizes() == expected_split
+    assert dlg2.width() == 1050
+    assert dlg2.height() == 750
+    assert dlg2.x() == 120
+    assert dlg2.y() == 160
+    dlg2.close()
+
+
+def test_details_dialog_saves_and_restores_maximized_state(qapp, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config_dir = tmp_path / "tech-watch"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    cfg_file = config_dir / "config.json"
+    initial_cfg = app_mod.load_config()
+    initial_cfg["symbols"] = ["A.TO"]
+    app_mod.save_config(initial_cfg)
+
+    # Start TrayApp 1, show details, maximize, and close
+    tray1 = app_mod.TrayApp(qapp)
+    tray1.show_details()
+    dlg1 = tray1._details_dialog
+    assert dlg1 is not None
+    dlg1.show()
+    qapp.processEvents()
+
+    dlg1.showMaximized()
+    qapp.processEvents()
+    assert dlg1.isMaximized()
+    dlg1.close()
+    qapp.processEvents()
+
+    saved_on_disk = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert saved_on_disk["details_maximized"] is True
+
+    # Start TrayApp 2 (simulating restart), show details, verify restored maximized
+    tray2 = app_mod.TrayApp(qapp)
+    tray2.show_details()
+    dlg2 = tray2._details_dialog
+    assert dlg2 is not None
+    qapp.processEvents()
+    assert dlg2.isMaximized()
+    dlg2.close()
+
+
+def test_details_dialog_terminal_runs_shell_command(qapp):
+    dlg = app_mod.DetailsDialog({"symbols": ["A.TO"], "last_results": {}})
+    term = dlg.terminal
+    term.input.setText("echo terminal-$((1+1))")
+    term.input.returnPressed.emit()
+    deadline = time.time() + 5
+    while time.time() < deadline and "terminal-2" not in term.output.toPlainText():
+        qapp.processEvents()
+        time.sleep(0.02)
+    assert "terminal-2" in term.output.toPlainText()
     dlg.close()
 
 
@@ -482,6 +733,19 @@ def test_analysis_worker_logs_each_result(monkeypatch, qapp, caplog):
         app_mod.AnalysisWorker(["A", "B"], {}, signals).run()
     assert "Check failed for A: boom" in caplog.text
     assert "Check completed for B: BUY" in caplog.text
+
+
+def test_analysis_worker_logs_progress(monkeypatch, qapp, caplog):
+    signals = app_mod.WorkerSignals()
+
+    def fake_query(sym, cfg, progress=None, cancel=None):
+        progress("sending query to agy [model]", sym)
+        return app_mod.AnalysisResult(sym, "BUY", "ok", "body", True, "", "t")
+
+    monkeypatch.setattr(app_mod, "query_gemini", fake_query)
+    with caplog.at_level(logging.INFO, logger="tech_watch.app"):
+        app_mod.AnalysisWorker(["A"], {}, signals).run()
+    assert "A: sending query to agy [model]" in caplog.text
 
 
 def test_screener_worker_success(monkeypatch, qapp):
@@ -839,4 +1103,65 @@ def test_main_no_tray(monkeypatch):
     monkeypatch.setattr(app_mod.QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: False))
     monkeypatch.setattr(app_mod.QMessageBox, "critical", staticmethod(lambda *a, **k: None))
     assert app_mod.main(["prog"]) == 1
+
+
+def test_main_exits_when_already_running(qapp, monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setattr(app_mod, "setup_logging", lambda: None)
+    existing = QApplication.instance()
+
+    class FakeApp:
+        def __init__(self, argv):
+            self._app = existing
+
+        def __getattr__(self, name):
+            return getattr(self._app, name)
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(app_mod, "QApplication", FakeApp)
+    monkeypatch.setattr(app_mod.QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True))
+    messages = []
+    monkeypatch.setattr(app_mod.QMessageBox, "information", staticmethod(lambda *a, **k: messages.append(a)))
+
+    lock_path = tmp_path / "tech-watch" / "tech-watch.lock"
+    lock_path.parent.mkdir()
+    held = app_mod.QLockFile(str(lock_path))
+    assert held.tryLock(100)
+    try:
+        assert app_mod.main(["prog"]) == 0
+    finally:
+        held.unlock()
+    assert messages and "already running" in messages[0][2]
+
+
+def test_save_warns_on_oserror(monkeypatch, caplog):
+    class Tray:
+        def __init__(self):
+            self.messages = []
+
+        def showMessage(self, *args):
+            self.messages.append(args)
+
+    class FakeTray:
+        _save = app_mod.TrayApp._save
+
+        def __init__(self):
+            self.cfg = {}
+            self.tray = Tray()
+
+    def fail(cfg):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(app_mod, "save_config", fail)
+    tray = FakeTray()
+    with caplog.at_level(logging.ERROR, logger="tech_watch.app"):
+        assert tray._save() is False
+    assert "Could not save config" in caplog.text
+    assert tray.tray.messages
+    assert "disk full" in tray.tray.messages[0][1]
+
+    monkeypatch.setattr(app_mod, "save_config", lambda cfg: None)
+    assert tray._save() is True
 

@@ -1,4 +1,5 @@
 import logging
+import os
 import shlex
 import signal
 import sys
@@ -6,8 +7,34 @@ import threading
 from datetime import datetime
 from typing import Any, Callable
 
-from PyQt6.QtCore import QObject, QPointF, QRectF, QSize, Qt, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QAction, QBrush, QColor, QIcon, QDesktopServices, QKeySequence, QPainter, QPainterPath, QPen, QPixmap
+from PyQt6.QtCore import (
+    QEvent,
+    QLockFile,
+    QObject,
+    QPointF,
+    QProcess,
+    QProcessEnvironment,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    QUrl,
+    pyqtSignal,
+)
+from PyQt6.QtGui import (
+    QAction,
+    QBrush,
+    QColor,
+    QFontDatabase,
+    QIcon,
+    QDesktopServices,
+    QKeySequence,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QTextCursor,
+)
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -32,6 +59,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QSplitter,
     QStyle,
     QSystemTrayIcon,
     QTableWidget,
@@ -41,7 +69,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .config import coerce_int, config_path, load_config, save_config
+from .config import coerce_int, config_path, data_dir, load_config, save_config
 from .gemini import AnalysisCancelled, AnalysisResult, query_gemini
 from .logging_setup import log_path, setup_logging
 
@@ -171,6 +199,181 @@ class ScreenerSignals(QObject):
     error = pyqtSignal(str)
 
 
+class LogEmitter(QObject):
+    message = pyqtSignal(int, str)
+
+
+class QtLogHandler(logging.Handler):
+    def __init__(self, emitter: LogEmitter):
+        super().__init__()
+        self._emitter = emitter
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._emitter.message.emit(record.levelno, self.format(record))
+        except Exception:
+            self.handleError(record)
+
+
+class TerminalPanel(QWidget):
+    levelsChanged = pyqtSignal(list)
+
+    def __init__(self, levels: list[int] | None = None, parent: QWidget | None = None):
+        super().__init__(parent)
+        fixed = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        self._records: list[tuple[int, str]] = []
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(5000)
+        self.log_view.setFont(fixed)
+
+        logs_page = QWidget()
+        logs_layout = QVBoxLayout(logs_page)
+        logs_layout.setContentsMargins(0, 0, 0, 0)
+        level_row = QHBoxLayout()
+        level_row.addWidget(QLabel("Levels:"))
+        enabled = set(levels) if levels is not None else {
+            logging.DEBUG, logging.INFO, logging.WARNING, logging.ERROR
+        }
+        self.checks: dict[int, QCheckBox] = {}
+        for name in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            level = getattr(logging, name)
+            box = QCheckBox(name)
+            box.setChecked(level in enabled)
+            box.toggled.connect(self._levels_changed)
+            self.checks[level] = box
+            level_row.addWidget(box)
+        level_row.addStretch(1)
+        self.clear_btn = QPushButton("Clear")
+        self.clear_btn.setToolTip("Clear logs")
+        self.clear_btn.clicked.connect(self.clear_logs)
+        level_row.addWidget(self.clear_btn)
+        logs_layout.addLayout(level_row)
+        logs_layout.addWidget(self.log_view, 1)
+        self.tabs.addTab(logs_page, "Logs")
+
+        term_page = QWidget()
+        term_layout = QVBoxLayout(term_page)
+        term_layout.setContentsMargins(0, 0, 0, 0)
+        self.output = QPlainTextEdit()
+        self.output.setReadOnly(True)
+        self.output.setMaximumBlockCount(10000)
+        self.output.setFont(fixed)
+        term_layout.addWidget(self.output, 1)
+        self.input = QLineEdit()
+        self.input.setPlaceholderText("Enter a shell command…")
+        self.input.setFont(fixed)
+        self.input.returnPressed.connect(self._submit)
+        term_layout.addWidget(self.input)
+        self.tabs.addTab(term_page, "Terminal")
+
+        # shortcut: pipe-based shell, no PTY (no full-screen curses apps), upgrade to a PTY if needed
+        self._proc = QProcess(self)
+        self._proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self._proc.readyReadStandardOutput.connect(self._read_output)
+        self._proc.finished.connect(self._on_finished)
+        self._start_shell()
+
+    def _start_shell(self) -> None:
+        if self._proc.state() != QProcess.ProcessState.NotRunning:
+            return
+        shell = os.environ.get("SHELL") or "/bin/sh"
+        args = ["-i"]
+        if os.path.basename(shell) == "bash":
+            args = ["--noprofile", "--norc", "-i"]
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("PS1", "")
+        env.insert("TERM", "dumb")
+        self._proc.setProcessEnvironment(env)
+        self._proc.start(shell, args)
+        if not self._proc.waitForStarted(2000):
+            self._append(f"[could not start {shell}: {self._proc.errorString()}]\n")
+
+    def _submit(self) -> None:
+        command = self.input.text()
+        if not command.strip():
+            return
+        self._start_shell()
+        self._append(f"$ {command}\n")
+        self._proc.write((command + "\n").encode())
+        self.input.clear()
+
+    def _read_output(self) -> None:
+        self._append(bytes(self._proc.readAllStandardOutput()).decode("utf-8", "replace"))
+
+    def _on_finished(self, code: int, _status: QProcess.ExitStatus) -> None:
+        self._append(f"[shell exited with code {code}]\n")
+
+    def _append(self, text: str) -> None:
+        if not text:
+            return
+        cursor = self.output.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertText(text)
+        self.output.setTextCursor(cursor)
+        self.output.ensureCursorVisible()
+
+    @staticmethod
+    def _visible(level: int, allowed: set[int]) -> bool:
+        if level == logging.CRITICAL:
+            return logging.ERROR in allowed
+        return level in allowed
+
+    def enabled_levels(self) -> list[int]:
+        return [level for level, box in self.checks.items() if box.isChecked()]
+
+    def _levels_changed(self, *_args: Any) -> None:
+        self._render_logs()
+        self.levelsChanged.emit(self.enabled_levels())
+
+    def _render_logs(self) -> None:
+        allowed = set(self.enabled_levels())
+        lines = [text for level, text in self._records if self._visible(level, allowed)]
+        self.log_view.setPlainText("\n".join(lines))
+        self.log_view.moveCursor(QTextCursor.MoveOperation.End)
+
+    def append_log(self, level: int, text: str) -> None:
+        self._records.append((level, text))
+        if len(self._records) > 5000:
+            del self._records[:-5000]
+        if self._visible(level, set(self.enabled_levels())):
+            self.log_view.appendPlainText(text)
+
+    def clear_logs(self) -> None:
+        self._records.clear()
+        self.log_view.clear()
+
+    @staticmethod
+    def _line_level(line: str) -> int:
+        parts = line.split(None, 3)
+        if len(parts) >= 3:
+            return getattr(logging, parts[2].upper(), logging.INFO)
+        return logging.INFO
+
+    def load_recent_logs(self, limit: int = 500) -> None:
+        try:
+            with open(log_path(), "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()[-limit:]
+        except OSError:
+            return
+        self._records = [(self._line_level(line), line.rstrip("\n")) for line in lines]
+        self._render_logs()
+
+    def shutdown(self) -> None:
+        if self._proc.state() == QProcess.ProcessState.NotRunning:
+            return
+        self._proc.terminate()
+        if not self._proc.waitForFinished(500):
+            self._proc.kill()
+            self._proc.waitForFinished(500)
+
+
 class AnalysisWorker(threading.Thread):
     def __init__(self, symbols: list[str], cfg: dict[str, Any], signals: WorkerSignals):
         super().__init__(daemon=True)
@@ -184,13 +387,14 @@ class AnalysisWorker(threading.Thread):
 
     def run(self) -> None:
         def progress(detail: str, sym: str = "") -> None:
+            log.info("%s: %s", sym or "?", detail)
             self.signals.progress.emit(sym or "", detail)
 
         try:
             for i, symbol in enumerate(self.symbols):
                 if self._cancel.is_set():
                     break
-                self.signals.progress.emit(symbol, "preparing check")
+                progress("preparing check", symbol)
                 try:
                     result = query_gemini(symbol, self.cfg, progress=progress, cancel=self._cancel)
                 except AnalysisCancelled:
@@ -217,7 +421,7 @@ class AnalysisWorker(threading.Thread):
                         )
                 if self._cancel.is_set():
                     break
-                self.signals.progress.emit(symbol, "formatting reply")
+                progress("formatting reply", symbol)
                 self.signals.result.emit(result)
                 for pending in self.symbols[i + 1 :]:
                     self.signals.progress.emit(pending, "pending")
@@ -346,7 +550,25 @@ class DetailsDialog(QDialog):
         if self._check_icon.isNull():
             self._check_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload)
         self.setWindowTitle("Tech Watch Tray - Details")
-        self.resize(940, 660)
+        self._was_shown = False
+        d_size = self.cfg.get("details_size")
+        if (
+            isinstance(d_size, list)
+            and len(d_size) == 2
+            and all(isinstance(v, int) and v >= 100 for v in d_size)
+        ):
+            self.resize(d_size[0], d_size[1])
+        else:
+            self.resize(940, 660)
+        d_pos = self.cfg.get("details_pos")
+        if (
+            isinstance(d_pos, list)
+            and len(d_pos) == 2
+            and all(isinstance(v, int) for v in d_pos)
+        ):
+            self.move(d_pos[0], d_pos[1])
+        if self.cfg.get("details_maximized"):
+            self.setWindowState(Qt.WindowState.WindowMaximized)
         layout = QVBoxLayout(self)
 
         self.tabs = QTabWidget()
@@ -388,7 +610,28 @@ class DetailsDialog(QDialog):
         self.detail_tabs.addTab(self.response_box, "AI response")
         symbol_layout.addWidget(self.detail_tabs)
         self.tabs.addTab(symbol_page, "Security details")
-        layout.addWidget(self.tabs)
+
+        # Show app DEBUG records in the logs tab without enabling third-party DEBUG noise.
+        logging.getLogger("tech_watch").setLevel(logging.DEBUG)
+        levels = None
+        saved_levels = self.cfg.get("log_levels")
+        if isinstance(saved_levels, list):
+            levels = [getattr(logging, str(name).upper(), None) for name in saved_levels]
+            levels = [level for level in levels if isinstance(level, int)]
+        self.terminal = TerminalPanel(levels)
+        self.terminal.load_recent_logs()
+        self.terminal.levelsChanged.connect(self._on_levels_changed)
+        self.splitter = QSplitter(Qt.Orientation.Vertical)
+        self.splitter.addWidget(self.tabs)
+        self.splitter.addWidget(self.terminal)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 0)
+        self.splitter.setChildrenCollapsible(False)
+        sizes = self.cfg.get("terminal_split")
+        if not (isinstance(sizes, list) and len(sizes) == 2 and all(isinstance(s, int) and s >= 0 for s in sizes)) or sum(sizes) <= 0:
+            sizes = [450, 150]
+        self.splitter.setSizes(sizes)
+        layout.addWidget(self.splitter, 1)
 
         self.status_label = QLabel("Ready")
         self.status_label.setWordWrap(True)
@@ -400,6 +643,20 @@ class DetailsDialog(QDialog):
         self._status_timer.setInterval(1000)
         self._status_timer.timeout.connect(self._tick_status)
         self.finished.connect(lambda _: self._status_timer.stop())
+
+        self._log_emitter = LogEmitter()
+        self._log_emitter.message.connect(self.terminal.append_log)
+        self._log_handler = QtLogHandler(self._log_emitter)
+        self._log_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        logging.getLogger().addHandler(self._log_handler)
+        self.finished.connect(self._cleanup_terminal)
+        self.destroyed.connect(self._detach_log_handler)
+
+        self._ui_save_timer = QTimer(self)
+        self._ui_save_timer.setSingleShot(True)
+        self._ui_save_timer.setInterval(400)
+        self._ui_save_timer.timeout.connect(self._save_ui_settings)
+        self.splitter.splitterMoved.connect(lambda *_: self._ui_save_timer.start())
 
         self._build_menu_bar(layout)
         self.symbol_box.currentTextChanged.connect(self._load_symbol)
@@ -441,6 +698,13 @@ class DetailsDialog(QDialog):
         details_act = view_menu.addAction("Security &details")
         details_act.setShortcut(QKeySequence("Ctrl+2"))
         details_act.triggered.connect(lambda: self.tabs.setCurrentIndex(1))
+        view_menu.addSeparator()
+        self._terminal_action = view_menu.addAction("&Terminal panel")
+        self._terminal_action.setCheckable(True)
+        self._terminal_action.setChecked(bool(self.cfg.get("terminal_visible", True)))
+        self._terminal_action.setShortcut(QKeySequence("Ctrl+`"))
+        self._terminal_action.toggled.connect(self._toggle_terminal)
+        self.terminal.setVisible(self._terminal_action.isChecked())
 
         tools_menu = bar.addMenu("&Tools")
         self._check_all_action = self._add_tray_action(tools_menu, "Check all &now", "run_daily_check", "F5")
@@ -496,6 +760,112 @@ class DetailsDialog(QDialog):
         self._check_all_action.setEnabled(not busy)
         self._cancel_action.setEnabled(busy)
         self._manage_action.setEnabled(not busy)
+
+    def _ensure_on_screen(self) -> None:
+        if self.isMaximized():
+            return
+        screens = QApplication.screens()
+        if not screens:
+            return
+        frame = self.frameGeometry()
+        if not any(s.availableGeometry().intersects(frame) for s in screens):
+            primary = QApplication.primaryScreen()
+            if primary is not None:
+                avail = primary.availableGeometry()
+                if not avail.isEmpty():
+                    self.move(avail.center() - self.rect().center())
+
+    def showEvent(self, event: Any) -> None:
+        super().showEvent(event)
+        self._was_shown = True
+        if self.cfg.get("details_maximized") and not self.isMaximized():
+            self.showMaximized()
+        elif not self.isMaximized():
+            self._ensure_on_screen()
+
+    def changeEvent(self, event: Any) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            if getattr(self, "_was_shown", False) and hasattr(self, "_ui_save_timer"):
+                self._ui_save_timer.start()
+
+    def moveEvent(self, event: Any) -> None:
+        super().moveEvent(event)
+        if getattr(self, "_was_shown", False) and hasattr(self, "_ui_save_timer"):
+            self._ui_save_timer.start()
+
+    def resizeEvent(self, event: Any) -> None:
+        super().resizeEvent(event)
+        if getattr(self, "_was_shown", False) and hasattr(self, "_ui_save_timer"):
+            self._ui_save_timer.start()
+
+    def _toggle_terminal(self, visible: bool) -> None:
+        self.terminal.setVisible(visible)
+        self._save_ui_settings()
+
+    def _on_levels_changed(self, _levels: list[int]) -> None:
+        self._save_ui_settings()
+
+    def _save_ui_settings(self) -> None:
+        if hasattr(self, "_ui_save_timer"):
+            self._ui_save_timer.stop()
+        if not self.terminal.isHidden():
+            sizes = self.splitter.sizes()
+            if sum(sizes) > 0:
+                self.cfg["terminal_split"] = sizes
+        else:
+            sizes = self.cfg.get("terminal_split")
+        visible = self._terminal_action.isChecked()
+        levels = [logging.getLevelName(level) for level in self.terminal.enabled_levels()]
+        self.cfg["log_levels"] = levels
+        self.cfg["terminal_visible"] = visible
+        if getattr(self, "_was_shown", False) or self.isVisible():
+            maximized = self.isMaximized()
+            self.cfg["details_maximized"] = maximized
+            if not maximized:
+                if self.width() >= 100 and self.height() >= 100:
+                    self.cfg["details_size"] = [self.width(), self.height()]
+                    self.cfg["details_pos"] = [self.x(), self.y()]
+            elif "details_size" not in self.cfg:
+                normal = self.normalGeometry()
+                if normal.isValid() and normal.width() >= 100 and normal.height() >= 100:
+                    self.cfg["details_size"] = [normal.width(), normal.height()]
+                    self.cfg["details_pos"] = [normal.x(), normal.y()]
+        tray = self._tray_app
+        save = getattr(tray, "_save", None)
+        if save is not None:
+            if isinstance(getattr(tray, "cfg", None), dict):
+                if sizes is not None and sum(sizes) > 0:
+                    tray.cfg["terminal_split"] = sizes
+                tray.cfg["log_levels"] = levels
+                tray.cfg["terminal_visible"] = visible
+                if "details_size" in self.cfg:
+                    tray.cfg["details_size"] = list(self.cfg["details_size"])
+                if "details_pos" in self.cfg and self.cfg["details_pos"] is not None:
+                    tray.cfg["details_pos"] = list(self.cfg["details_pos"])
+                if "details_maximized" in self.cfg:
+                    tray.cfg["details_maximized"] = self.cfg["details_maximized"]
+            save()
+
+    def _detach_log_handler(self, *_args: Any) -> None:
+        root = logging.getLogger()
+        if self._log_handler in root.handlers:
+            root.removeHandler(self._log_handler)
+        self._log_handler.close()
+
+    def _cleanup_terminal(self, *_args: Any) -> None:
+        self._save_ui_settings()
+        self.terminal.shutdown()
+        self._detach_log_handler()
+
+    def done(self, r: int) -> None:
+        self._save_ui_settings()
+        super().done(r)
+
+    def closeEvent(self, event: Any) -> None:
+        self._save_ui_settings()
+        self._cleanup_terminal()
+        super().closeEvent(event)
 
     def _show_about(self) -> None:
         from . import __version__
@@ -1086,6 +1456,15 @@ class TrayApp(QObject):
         # Delay first automatic run slightly so tray/session settles.
         QTimer.singleShot(15_000, self.run_daily_check_if_due)
 
+        about_to_quit = getattr(self.app, "aboutToQuit", None)
+        if about_to_quit is not None and hasattr(about_to_quit, "connect"):
+            about_to_quit.connect(self._on_about_to_quit)
+
+    def _on_about_to_quit(self) -> None:
+        if self._details_dialog is not None:
+            self._details_dialog._save_ui_settings()
+            self._details_dialog.close()
+
     def _icon_for_state(self, state: str) -> QIcon:
         return _tray_icon(state)
 
@@ -1131,8 +1510,19 @@ class TrayApp(QObject):
         if self.busy_timer.isActive():
             self.busy_timer.stop()
 
-    def _save(self) -> None:
-        save_config(self.cfg)
+    def _save(self) -> bool:
+        try:
+            save_config(self.cfg)
+            return True
+        except OSError as e:
+            log.error("Could not save config: %s", e)
+            self.tray.showMessage(
+                "Tech Watch Tray",
+                f"Could not save settings: {e}",
+                QSystemTrayIcon.MessageIcon.Warning,
+                10000,
+            )
+            return False
 
     def _apply_timer(self) -> None:
         hours = max(1, int(self.cfg.get("check_interval_hours") or 24))
@@ -1499,7 +1889,10 @@ class TrayApp(QObject):
         if dlg is not None and dlg.isVisible():
             dlg.update_data(self.cfg, symbol)
             dlg.set_check_status(self._check_status, self._status_since)
-            dlg.show()
+            if self.cfg.get("details_maximized") and not dlg.isMaximized():
+                dlg.showMaximized()
+            else:
+                dlg.show()
             dlg.raise_()
             dlg.activateWindow()
             return
@@ -1507,7 +1900,10 @@ class TrayApp(QObject):
         dlg.set_check_status(self._check_status, self._status_since)
         self._details_dialog = dlg
         dlg.finished.connect(self._details_closed)
-        dlg.show()
+        if self.cfg.get("details_maximized"):
+            dlg.showMaximized()
+        else:
+            dlg.show()
         dlg.raise_()
         dlg.activateWindow()
 
@@ -1530,15 +1926,16 @@ class TrayApp(QObject):
             self._settings_dialog = None
             if code == QDialog.DialogCode.Accepted:
                 self.cfg = dlg.result_config()
-                self._save()
+                saved = self._save()
                 self._apply_timer()
                 self._rebuild_menu()
-                self.tray.showMessage(
-                    "Tech Watch Tray",
-                    "Settings saved. Restart is not required; new checks will use them.",
-                    QSystemTrayIcon.MessageIcon.Information,
-                    7000,
-                )
+                if saved:
+                    self.tray.showMessage(
+                        "Tech Watch Tray",
+                        "Settings saved. Restart is not required; new checks will use them.",
+                        QSystemTrayIcon.MessageIcon.Information,
+                        7000,
+                    )
 
         dlg.finished.connect(_finished)
         dlg.show()
@@ -1590,6 +1987,15 @@ def main(argv: list[str] | None = None) -> int:
             "System tray is not available on this session. Start it in a Plasma/KDE tray-enabled session.",
         )
         return 1
+
+    instance_lock = QLockFile(str(data_dir() / "tech-watch.lock"))
+    if not instance_lock.tryLock(100):
+        QMessageBox.information(
+            None,
+            "Tech Watch Tray",
+            "Tech Watch Tray is already running.",
+        )
+        return 0
 
     tray_app = TrayApp(app)
 

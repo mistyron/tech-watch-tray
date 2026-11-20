@@ -125,6 +125,7 @@ def test_fetch_live_snapshot_uses_adjusted_prices_and_candidates(monkeypatch):
     assert calls[0][0] == "AAPL"
     assert calls[1][0] == "AAPL.TO"
     assert all(kwargs["auto_adjust"] is True for _, kwargs in calls)
+    assert all(kwargs["period"] == "14mo" for _, kwargs in calls)
     assert "AAPL.TO" in text
 
 

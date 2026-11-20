@@ -348,7 +348,7 @@ def screen_symbols(
     symbols: list[dict[str, str]],
     min_score: int = 55,
     batch_size: int = 40,
-    period: str = "10mo",
+    period: str = "14mo",
     progress_cb=None,
     errors: list[str] | None = None,
 ) -> list[ScreenHit]:

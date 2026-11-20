@@ -168,3 +168,49 @@ def test_config_files_and_dirs_have_restricted_permissions(monkeypatch, tmp_path
     assert (cfg_file.stat().st_mode & 0o777) == 0o600
     assert (cfg_dir.stat().st_mode & 0o777) == 0o700
     assert (lock_file.stat().st_mode & 0o777) == 0o600
+
+
+def test_load_config_ui_geometry_and_settings(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config.config_dir()
+    loaded = config.load_config()
+    assert loaded["log_levels"] == ["DEBUG", "INFO", "WARNING", "ERROR"]
+    assert loaded["terminal_split"] == [450, 150]
+    assert loaded["terminal_visible"] is True
+    assert loaded["details_size"] == [940, 660]
+    assert loaded["details_pos"] is None
+    assert loaded["details_maximized"] is False
+
+    custom = {
+        "log_levels": ["warning", "ERROR", "INVALID"],
+        "terminal_split": [500, 250],
+        "terminal_visible": False,
+        "details_size": [1100, 750],
+        "details_pos": [150, 250],
+        "details_maximized": True,
+    }
+    config.config_path().write_text(json.dumps(custom), encoding="utf-8")
+    loaded = config.load_config()
+    assert loaded["log_levels"] == ["WARNING", "ERROR"]
+    assert loaded["terminal_split"] == [500, 250]
+    assert loaded["terminal_visible"] is False
+    assert loaded["details_size"] == [1100, 750]
+    assert loaded["details_pos"] == [150, 250]
+    assert loaded["details_maximized"] is True
+
+    bad = {
+        "log_levels": "not-a-list",
+        "terminal_split": [0, 0],
+        "terminal_visible": "yes",
+        "details_size": [50, 50],
+        "details_pos": "not-a-list",
+        "details_maximized": "true",
+    }
+    config.config_path().write_text(json.dumps(bad), encoding="utf-8")
+    loaded = config.load_config()
+    assert loaded["log_levels"] == ["DEBUG", "INFO", "WARNING", "ERROR"]
+    assert loaded["terminal_split"] == [450, 150]
+    assert loaded["terminal_visible"] is True
+    assert loaded["details_size"] == [940, 660]
+    assert loaded["details_pos"] is None
+    assert loaded["details_maximized"] is False

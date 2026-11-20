@@ -42,6 +42,12 @@ DEFAULT_CONFIG = {
         "SUMMARY: <one short sentence>"
     ),
     "notify_on": ["BUY"],
+    "log_levels": ["DEBUG", "INFO", "WARNING", "ERROR"],
+    "terminal_split": [450, 150],
+    "terminal_visible": True,
+    "details_size": [940, 660],
+    "details_pos": None,
+    "details_maximized": False,
     "last_results": {},
 }
 
@@ -123,6 +129,38 @@ def load_config() -> dict[str, Any]:
         }
     if not isinstance(merged.get("notify_on"), list):
         merged["notify_on"] = DEFAULT_CONFIG["notify_on"][:]
+    levels = merged.get("log_levels")
+    valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR"}
+    if not isinstance(levels, list):
+        merged["log_levels"] = DEFAULT_CONFIG["log_levels"][:]
+    else:
+        merged["log_levels"] = [str(level).upper() for level in levels if str(level).upper() in valid_levels]
+    split = merged.get("terminal_split")
+    if not isinstance(split, list) or len(split) != 2 or not all(isinstance(size, int) and size >= 0 for size in split):
+        merged["terminal_split"] = DEFAULT_CONFIG["terminal_split"][:]
+    elif sum(split) <= 0:
+        merged["terminal_split"] = DEFAULT_CONFIG["terminal_split"][:]
+    if not isinstance(merged.get("terminal_visible"), bool):
+        merged["terminal_visible"] = True
+    details_size = merged.get("details_size")
+    if (
+        not isinstance(details_size, list)
+        or len(details_size) != 2
+        or not all(isinstance(v, int) and v >= 100 for v in details_size)
+    ):
+        merged["details_size"] = DEFAULT_CONFIG["details_size"][:]
+    details_pos = merged.get("details_pos")
+    if (
+        details_pos is not None
+        and (
+            not isinstance(details_pos, list)
+            or len(details_pos) != 2
+            or not all(isinstance(v, int) for v in details_pos)
+        )
+    ):
+        merged["details_pos"] = None
+    if not isinstance(merged.get("details_maximized"), bool):
+        merged["details_maximized"] = False
     mode = str(merged.get("check_on_startup") or "due").strip().lower()
     merged["check_on_startup"] = mode if mode in {"due", "always", "never"} else "due"
     merged["check_interval_hours"] = coerce_int(
