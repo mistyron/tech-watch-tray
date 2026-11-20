@@ -42,7 +42,28 @@ flowchart TB
     FB --> AIEXT
     FB --> DATAEXT
     SCR --> DATAEXT
+
+    AIEXT -.->|response| AI
+    DATAEXT -.->|market data| FB
+    DATAEXT -.->|price history| SCR
+    FB -.->|fallback result| AI
+    AI -.->|AnalysisResult| WORK
+    SCR -.->|ScreenHit list| WORK
+    WORK -.->|Qt signals| UI
+    STATE -.->|load at startup| UI
 ```
+
+Solid arrows are requests; dashed arrows are responses.
+
+- **app.py — PyQt6 tray process**: all UI (tray icon/menu, dialogs, TerminalPanel) plus scheduling and result display.
+- **Worker threads**: run AI checks and screener scans off the GUI thread; they have no UI and report back via Qt signals.
+- **gemini.py**: builds the prompt, runs the configured AI command, and parses `VERDICT`/`SUMMARY`.
+- **agy_auth.py**: detects auth errors so the app can report or recover from them.
+- **Fallback chain**: tries other `agy` models, then a local Ollama model using live data.
+- **screener.py**: builds the TSX universe, downloads price history, and scores technicals.
+- **AI CLI or Ollama**: external processes/servers that produce the analysis.
+- **Yahoo Finance · TSX lists**: market data and index constituents fetched over HTTPS.
+- **Local state**: persisted config/results, rotating log, and single-instance lock.
 
 ## Check pipeline
 
