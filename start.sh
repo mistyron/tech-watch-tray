@@ -37,7 +37,7 @@ Environment:
   TECH_WATCH_OLLAMA_MODE  auto, container, host, or off (default: auto)
   TECH_WATCH_VENV         Virtualenv directory (default: .venv)
   TECH_WATCH_PYTHON       Python used to create the virtualenv (default: python3)
-  TECH_WATCH_INSTALL_AGY  Install agy into the app image (default: 1)
+  TECH_WATCH_INSTALL_AGY  Install agy into the app image (default: 0)
   TECH_WATCH_QT_PLATFORM  Override Qt platform inside the app container
   OLLAMA_MODEL            Model to ensure is present (default: config ai.ollama_model)
 
@@ -167,7 +167,7 @@ setup_container_app_env() {
     export KDE_SESSION_VERSION="${KDE_SESSION_VERSION:-6}"
     export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-}"
     export TECH_WATCH_QT_PLATFORM="${TECH_WATCH_QT_PLATFORM:-}"
-    export TECH_WATCH_INSTALL_AGY="${TECH_WATCH_INSTALL_AGY:-1}"
+    export TECH_WATCH_INSTALL_AGY="${TECH_WATCH_INSTALL_AGY:-0}"
 }
 
 compose_cmd() {

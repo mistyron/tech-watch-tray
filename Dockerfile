@@ -5,7 +5,9 @@ FROM python:3.13-slim-trixie
 
 ARG UID=1000
 ARG GID=1000
-ARG INSTALL_AGY=1
+# Disabled by default: it downloads and executes a remote installer as root during
+# the image build. Review the installer and verify its checksum before enabling.
+ARG INSTALL_AGY=0
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -78,8 +80,9 @@ RUN pip install --upgrade pip \
 
 RUN if [ "${INSTALL_AGY}" = "1" ]; then \
         echo "Installing Antigravity CLI (agy)..." \
-        && curl -fsSL https://antigravity.google/cli/install.sh \
-            | bash -s -- --dir /usr/local/bin; \
+        && curl -fsSL https://antigravity.google/cli/install.sh -o /tmp/agy-install.sh \
+        && bash /tmp/agy-install.sh --dir /usr/local/bin \
+        && rm -f /tmp/agy-install.sh; \
     fi
 
 ENTRYPOINT ["/usr/local/bin/tech-watch-entrypoint"]

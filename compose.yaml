@@ -5,7 +5,7 @@ services:
       args:
         UID: ${TECH_WATCH_UID:-1000}
         GID: ${TECH_WATCH_GID:-1000}
-        INSTALL_AGY: ${TECH_WATCH_INSTALL_AGY:-1}
+        INSTALL_AGY: ${TECH_WATCH_INSTALL_AGY:-0}
     image: tech-watch:local
     init: true
     depends_on:
