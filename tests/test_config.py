@@ -214,3 +214,36 @@ def test_load_config_ui_geometry_and_settings(monkeypatch, tmp_path):
     assert loaded["details_size"] == [940, 660]
     assert loaded["details_pos"] is None
     assert loaded["details_maximized"] is False
+
+
+def test_load_config_normalizes_symbols_and_result_keys(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config.config_dir()
+    config.config_path().write_text(
+        json.dumps(
+            {
+                "symbols": [" xic.to ", "XIC.TO", "", "shop.to"],
+                "last_results": {"xic.to": {"verdict": "BUY"}, "": {"verdict": "BAD"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = config.load_config()
+    assert loaded["symbols"] == ["XIC.TO", "SHOP.TO"]
+    assert loaded["last_results"] == {"XIC.TO": {"verdict": "BUY"}}
+
+
+def test_load_config_does_not_overwrite_invalid_backup(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config.config_dir()
+    path = config.config_path()
+    path.write_text("{bad", encoding="utf-8")
+    config.load_config()
+    backup = path.with_suffix(".bak")
+    assert backup.exists()
+    original_backup = backup.read_text(encoding="utf-8")
+    path.write_text("{bad again", encoding="utf-8")
+    config.load_config()
+    assert backup.read_text(encoding="utf-8") == original_backup
+    backups = list(path.parent.glob("config.bak*"))
+    assert len(backups) >= 2

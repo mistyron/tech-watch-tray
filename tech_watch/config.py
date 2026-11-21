@@ -2,6 +2,7 @@ import fcntl
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +90,8 @@ def _restrict_permissions(path: Path, mode: int = 0o600) -> None:
 
 def _backup_invalid_config(path: Path) -> None:
     backup = path.with_suffix(".bak")
+    if backup.exists():
+        backup = path.with_name(f"{backup.name}.{int(time.time_ns())}")
     try:
         path.replace(backup)
         _restrict_permissions(backup, 0o600)
@@ -121,11 +124,20 @@ def load_config() -> dict[str, Any]:
     # Ensure types/keys for nested-ish fields
     if not isinstance(merged.get("symbols"), list):
         merged["symbols"] = DEFAULT_CONFIG["symbols"][:]
+    else:
+        symbols = []
+        for raw in merged["symbols"]:
+            symbol = str(raw).strip().upper()
+            if symbol and symbol not in symbols:
+                symbols.append(symbol)
+        merged["symbols"] = symbols
     if not isinstance(merged.get("last_results"), dict):
         merged["last_results"] = {}
     else:
         merged["last_results"] = {
-            str(k): v for k, v in merged["last_results"].items() if isinstance(v, dict)
+            str(k).strip().upper(): v
+            for k, v in merged["last_results"].items()
+            if isinstance(v, dict) and str(k).strip()
         }
     if not isinstance(merged.get("notify_on"), list):
         merged["notify_on"] = DEFAULT_CONFIG["notify_on"][:]
