@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from .agy_auth import is_auth_error
+from .agy_auth import is_auth_error, redact_sensitive
 from .config import DEFAULT_CONFIG, coerce_int
 
 log = logging.getLogger(__name__)
@@ -438,10 +438,10 @@ def _friendly_error(text: str) -> str:
     low = t.lower()
     if "resource_exhausted" in low or "quota" in low or "429" in low or "rate limit" in low or "too many requests" in low:
         line = (t.strip().splitlines() or ["Quota/rate limit reached"])[0]
-        return line[:240]
+        return redact_sensitive(line, 240)
     if "oauth" in low and "auth" in low:
         return "AI command authentication failed. Verify the configured command works in a terminal."
-    return (t.strip().splitlines() or ["AI command failed"])[0][:240]
+    return redact_sensitive((t.strip().splitlines() or ["AI command failed"])[0], 240)
 
 
 def _is_fallback_error(text: str) -> bool:
@@ -639,6 +639,7 @@ def _run_command(argv: list[str], timeout: int, cancel: Any = None) -> subproces
         raise AnalysisCancelled
     proc = subprocess.Popen(
         argv,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

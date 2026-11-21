@@ -175,6 +175,12 @@ def test_friendly_error_and_fallback_detection():
     assert "429" in gemini._friendly_error("HTTP 429 resource_exhausted quota")
     assert "authentication failed" in gemini._friendly_error("OAuth auth error")
     assert gemini._friendly_error("\n\nboom\nmore") == "boom"
+    auth_code = gemini._friendly_error("Authentication failed. Code: 4/0ABCdef123456789")
+    assert "4/0ABCdef123456789" not in auth_code
+    assert "<code>" in auth_code
+    url_error = gemini._friendly_error("Authentication failed at https://example.com/auth?token=secret")
+    assert "example.com" not in url_error
+    assert "<url>" in url_error
     assert gemini._is_fallback_error("resource_exhausted")
     assert gemini._is_fallback_error("code 429")
     assert gemini._is_fallback_error("rate limit")
@@ -220,6 +226,7 @@ def test_run_command_uses_new_session(monkeypatch):
     proc = gemini._run_command(["gemini"], 10)
     assert proc.stdout == "VERDICT: BUY\nSUMMARY: up"
     assert seen["start_new_session"] is True
+    assert seen["stdin"] is subprocess.DEVNULL
 
 
 def test_run_command_cancel_kills_process_group(monkeypatch):
